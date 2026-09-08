@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Test
+        run: cargo test --all-targets
+
+      - name: Build
+        run: cargo build --release
+
+      # The walker, the on-disk size calculation and the hard-link handling all
+      # have per-platform implementations, so the binary is actually run on each
+      # OS rather than merely compiled.
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BIN=target/release/duw
+          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+
+          "$BIN" --no-open --port 8099 --max-depth 3 src &
+          PID=$!
+          trap 'kill $PID 2>/dev/null || true; rm -f state.json' EXIT
+
+          ready=0
+          for _ in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8099/api/state -o state.json; then
+              ready=1
+              break
+            fi
+            sleep 0.5
+          done
+          [ "$ready" = 1 ] || { echo "server never came up"; exit 1; }
+
+          cat state.json
+          grep -q '"root_id":0' state.json
+
+          # Windows estimates on-disk size from the cluster size and cannot
+          # dedupe hard links; Unix does both exactly. Assert the binary knows
+          # which platform it is on.
+          case "${{ runner.os }}" in
+            Windows) want='"one_file_system":false,"hardlink_dedup":false,"approximate_alloc":true' ;;
+            *)       want='"one_file_system":true,"hardlink_dedup":true,"approximate_alloc":false' ;;
+          esac
+          grep -q "$want" state.json || { echo "wrong platform flags, expected $want"; exit 1; }
+
+          # The embedded UI must be served, not just linked in.
+          curl -sf http://127.0.0.1:8099/ | grep -q '<title>duw</title>'
+          curl -sf 'http://127.0.0.1:8099/api/node/0?limit=5' | grep -q '"children"'
+          curl -sf 'http://127.0.0.1:8099/api/types/0' | grep -q '"types"'
+          curl -sf -X POST http://127.0.0.1:8099/api/cancel -o /dev/null
+
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all --check
+
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  web:
+    # web/dist is committed so that `cargo install duw` needs no Node. That only
+    # holds if the committed bundle matches the sources, which is what this job
+    # checks.
+    name: web bundle is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+        working-directory: web
+
+      - run: npm run build
+        working-directory: web
+
+      - name: Check the committed bundle is up to date
+        run: |
+          if [ -n "$(git status --porcelain -- web/dist)" ]; then
+            echo "web/dist does not match web/src:"
+            git status --porcelain -- web/dist
+            echo
+            echo "Run 'npm run build' in web/ and commit the result."
+            exit 1
+          fi
+          echo "web/dist is up to date"

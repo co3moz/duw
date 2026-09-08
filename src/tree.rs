@@ -295,9 +295,11 @@ impl Tree {
             }
         };
         ids.sort_unstable_by(|a, b| {
-            key(self, *b)
-                .cmp(&key(self, *a))
-                .then_with(|| self.nodes[*a as usize].name.cmp(&self.nodes[*b as usize].name))
+            key(self, *b).cmp(&key(self, *a)).then_with(|| {
+                self.nodes[*a as usize]
+                    .name
+                    .cmp(&self.nodes[*b as usize].name)
+            })
         });
 
         let shown: Vec<Entry> = ids.iter().take(limit).map(|i| self.entry_of(*i)).collect();
@@ -516,7 +518,10 @@ fn extension_of(name: &str) -> Option<String> {
     if stem.is_empty() || ext.is_empty() || ext.len() > 16 {
         return None;
     }
-    if !ext.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if !ext
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         return None;
     }
     Some(ext.to_ascii_lowercase())
@@ -582,7 +587,10 @@ mod tests {
         let dirs = t.add_children(ROOT, vec![entry("d", Kind::Dir, 0)]);
         t.add_children(
             dirs[0],
-            vec![entry("small", Kind::File, 5), entry("big", Kind::File, 5000)],
+            vec![
+                entry("small", Kind::File, 5),
+                entry("big", Kind::File, 5000),
+            ],
         );
         let top = t.largest_files(ROOT, false, 1);
         assert_eq!(top.len(), 1);
