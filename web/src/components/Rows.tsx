@@ -78,6 +78,11 @@ export function FolderRows({
               )}
               {hint && <span className="badge" title={`${e.name} holds ${hint}`}>{hint}</span>}
               {e.err && <span className="badge badge-err">unreadable</span>}
+              {e.cloud && (
+                <span className="badge badge-cloud" title="Stored in the cloud, not on this disk">
+                  local-only-filter
+                </span>
+              )}
               {e.kind === 'dir' && !e.read && <span className="badge badge-wait">scanning…</span>}
             </span>
             <span className="row-meta">

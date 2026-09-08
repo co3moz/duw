@@ -56,6 +56,9 @@ duw [OPTIONS] [PATH]
   -x, --one-file-system    Skip directories on other filesystems (Unix only)
   -L, --dereference        Follow symbolic links
   -l, --count-links        Count hard-linked files once per link
+      --local-only         Ignore cloud placeholders such as OneDrive or
+                           iCloud files, which report a size but are not
+                           on this disk (Windows only)
   -d, --max-depth <N>      Do not descend more than N levels
       --exclude <PATTERN>  Exclude entries matching a glob (repeatable)
   -X, --exclude-from <F>   Read exclude patterns from a file

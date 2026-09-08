@@ -25,6 +25,7 @@ pub struct ScanOpts {
     pub max_depth: Option<u16>,
     pub exclude: Option<GlobSet>,
     pub threads: Option<usize>,
+    pub local_only: bool,
 }
 
 pub struct Scanner {
@@ -176,6 +177,7 @@ impl Scanner {
                         alloc: 0,
                         mtime: 0,
                         err: true,
+                        cloud: false,
                     });
                     continue;
                 }
@@ -192,14 +194,32 @@ impl Scanner {
                 Kind::Other
             };
 
+            // Cloud placeholders report their full size but occupy nothing
+            // here. With --local-only they are listed at zero and, for
+            // directories, never opened.
+            let cloud = self.opts.local_only && fsext::is_cloud_backed(&md, &child);
+
             if kind == Kind::Dir {
                 if self.opts.one_file_system && fsext::device(&md) != self.root_device {
                     skipped += 1;
                     continue;
                 }
-                if recurse {
+                if recurse && !cloud {
                     subdirs.push(child);
                 }
+            }
+
+            if cloud {
+                entries.push(NewEntry {
+                    name,
+                    kind,
+                    size: 0,
+                    alloc: 0,
+                    mtime: fsext::mtime(&md),
+                    err: false,
+                    cloud: true,
+                });
+                continue;
             }
 
             let (mut size, mut alloc) = fsext::sizes(&md);
@@ -221,6 +241,7 @@ impl Scanner {
                 alloc,
                 mtime: fsext::mtime(&md),
                 err: false,
+                cloud: false,
             });
         }
 

@@ -46,6 +46,8 @@ export interface Entry {
   mtime: number
   read: boolean
   err: boolean
+  /// Held back by --local-only: the bytes live in the cloud, not on this disk.
+  cloud: boolean
   ext: string | null
 }
 

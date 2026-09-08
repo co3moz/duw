@@ -38,17 +38,26 @@ mod imp {
         }
     }
 
+    pub fn is_cloud_backed(_md: &Metadata, _path: &Path) -> bool {
+        false
+    }
+
     pub const ONE_FILE_SYSTEM_SUPPORTED: bool = true;
     pub const HARDLINK_DEDUP_SUPPORTED: bool = true;
+    pub const CLOUD_DETECTION_SUPPORTED: bool = false;
 }
 
 #[cfg(windows)]
 mod imp {
     use super::*;
     use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceW;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FindClose, FindFirstFileW, GetDiskFreeSpaceW, WIN32_FIND_DATAW,
+    };
 
     static CLUSTER: AtomicU64 = AtomicU64::new(4096);
 
@@ -109,8 +118,69 @@ mod imp {
         None
     }
 
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
+    const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
+    const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+
+    /// True when the entry reports a size but its bytes are not on this disk:
+    /// OneDrive, iCloud and the like keep placeholders that only look local.
+    pub fn is_cloud_backed(md: &Metadata, path: &Path) -> bool {
+        let attrs = md.file_attributes();
+
+        // Dehydrated files say so in their attributes.
+        const DEHYDRATED: u32 = FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+            | FILE_ATTRIBUTE_RECALL_ON_OPEN
+            | FILE_ATTRIBUTE_OFFLINE;
+        if attrs & DEHYDRATED != 0 {
+            return true;
+        }
+
+        // Placeholder directories carry nothing but a reparse point, so the tag
+        // has to be read to tell a cloud root from a junction or a container
+        // mount. Only reparse points get this extra call, and they are rare.
+        if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return matches!(reparse_tag(path), Some(tag) if is_cloud_tag(tag));
+        }
+        false
+    }
+
+    /// `IO_REPARSE_TAG_CLOUD` through `IO_REPARSE_TAG_CLOUD_F`, which differ
+    /// only in one nibble (0x9000_001A .. 0x9000_F01A).
+    fn is_cloud_tag(tag: u32) -> bool {
+        tag & 0xFFFF_0FFF == 0x9000_001A
+    }
+
+    /// Reads the reparse tag through the directory-enumeration API.
+    ///
+    /// This must never open the entry. Opening a cloud placeholder, even with
+    /// no access rights and `FILE_FLAG_OPEN_REPARSE_POINT`, makes the sync
+    /// filter hydrate it, so a tool meant to avoid downloads would trigger
+    /// them. `FindFirstFileW` only reads the directory record and reports the
+    /// tag in `dwReserved0`.
+    fn reparse_tag(path: &Path) -> Option<u32> {
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        wide.push(0);
+
+        unsafe {
+            let mut data: WIN32_FIND_DATAW = std::mem::zeroed();
+            let handle = FindFirstFileW(wide.as_ptr(), &mut data);
+            if handle == INVALID_HANDLE_VALUE {
+                return None;
+            }
+            FindClose(handle);
+
+            if data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                Some(data.dwReserved0)
+            } else {
+                None
+            }
+        }
+    }
+
     pub const ONE_FILE_SYSTEM_SUPPORTED: bool = false;
     pub const HARDLINK_DEDUP_SUPPORTED: bool = false;
+    pub const CLOUD_DETECTION_SUPPORTED: bool = true;
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -131,10 +201,16 @@ mod imp {
         None
     }
 
+    pub fn is_cloud_backed(_md: &Metadata, _path: &Path) -> bool {
+        false
+    }
+
     pub const ONE_FILE_SYSTEM_SUPPORTED: bool = false;
     pub const HARDLINK_DEDUP_SUPPORTED: bool = false;
+    pub const CLOUD_DETECTION_SUPPORTED: bool = false;
 }
 
 pub use imp::{
-    device, hardlink_key, init, sizes, HARDLINK_DEDUP_SUPPORTED, ONE_FILE_SYSTEM_SUPPORTED,
+    device, hardlink_key, init, is_cloud_backed, sizes, CLOUD_DETECTION_SUPPORTED,
+    HARDLINK_DEDUP_SUPPORTED, ONE_FILE_SYSTEM_SUPPORTED,
 };

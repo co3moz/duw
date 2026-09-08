@@ -37,6 +37,11 @@ pub struct Args {
     #[arg(short = 'l', long)]
     pub count_links: bool,
 
+    /// Ignore files and folders whose contents live in the cloud rather than on
+    /// this disk, such as OneDrive or iCloud placeholders (Windows only).
+    #[arg(long)]
+    pub local_only: bool,
+
     /// Do not descend more than N levels below the starting directory.
     #[arg(short = 'd', long, value_name = "N")]
     pub max_depth: Option<u16>,

@@ -37,6 +37,10 @@ fn run() -> Result<(), String> {
         eprintln!("duw: warning: --one-file-system is not supported on this platform, ignoring");
     }
 
+    if args.local_only && !fsext::CLOUD_DETECTION_SUPPORTED {
+        eprintln!("duw: warning: --local-only is not supported on this platform, ignoring");
+    }
+
     let exclude = build_excludes(&args)?;
 
     let opts = ScanOpts {
@@ -47,6 +51,7 @@ fn run() -> Result<(), String> {
         max_depth: args.max_depth,
         exclude,
         threads: args.threads,
+        local_only: args.local_only && fsext::CLOUD_DETECTION_SUPPORTED,
     };
 
     let scanner = Scanner::new(opts).map_err(|e| format!("cannot scan {}: {e}", root.display()))?;

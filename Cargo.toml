@@ -33,7 +33,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync",
 tokio-stream = { version = "0.1", features = ["time"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
 
 [profile.release]
 opt-level = 3

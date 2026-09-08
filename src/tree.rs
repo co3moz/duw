@@ -41,6 +41,8 @@ pub struct Node {
     pub read: bool,
     /// Reading this entry failed.
     pub err: bool,
+    /// Held back by `--local-only`: its bytes live in the cloud, not here.
+    pub cloud: bool,
     pub children: Vec<u32>,
 }
 
@@ -52,6 +54,7 @@ pub struct NewEntry {
     pub alloc: u64,
     pub mtime: i64,
     pub err: bool,
+    pub cloud: bool,
 }
 
 #[derive(Default, Clone, Serialize)]
@@ -102,6 +105,7 @@ impl Tree {
             depth: 0,
             read: false,
             err: false,
+            cloud: false,
             children: Vec::new(),
         };
         Tree {
@@ -126,7 +130,9 @@ impl Tree {
     }
 
     /// Insert the children of `parent`, returning the ids of the child
-    /// directories in the same order they appeared in `entries`.
+    /// directories that should be walked, in the order they appeared in
+    /// `entries`. Cloud placeholders are left out: they are listed, but their
+    /// contents are never opened.
     pub fn add_children(&mut self, parent: u32, entries: Vec<NewEntry>) -> Vec<u32> {
         let depth = self.nodes[parent as usize].depth.saturating_add(1);
         let mut d_size = 0u64;
@@ -148,7 +154,9 @@ impl Tree {
             };
             if e.kind == Kind::Dir {
                 d_dirs += 1;
-                dir_ids.push(id);
+                if !e.cloud {
+                    dir_ids.push(id);
+                }
             } else {
                 d_files += 1;
             }
@@ -167,8 +175,11 @@ impl Tree {
                 mtime: e.mtime,
                 ext,
                 depth,
-                read: false,
+                // A filtered directory is never descended into, so calling it
+                // unread would leave a permanent "scanning…" marker on it.
+                read: e.cloud,
                 err: e.err,
+                cloud: e.cloud,
                 children: Vec::new(),
             });
         }
@@ -277,6 +288,7 @@ impl Tree {
             mtime: n.mtime,
             read: n.read,
             err: n.err,
+            cloud: n.cloud,
             ext: self.ext_name(n.ext).map(|s| s.to_string()),
         }
     }
@@ -468,6 +480,7 @@ pub struct Entry {
     pub mtime: i64,
     pub read: bool,
     pub err: bool,
+    pub cloud: bool,
     pub ext: Option<String>,
 }
 
@@ -539,6 +552,7 @@ mod tests {
             alloc: size,
             mtime: 0,
             err: false,
+            cloud: false,
         }
     }
 
@@ -579,6 +593,25 @@ mod tests {
         assert_eq!(v.children[0].size, 100);
         assert_eq!(v.other.count, 7);
         assert_eq!(v.other.size, 10 + 20 + 30 + 40 + 50 + 60 + 70);
+    }
+
+    #[test]
+    fn cloud_directories_are_listed_but_not_walked() {
+        let mut t = Tree::new("root".into(), 0, 0, 0);
+        let mut placeholder = entry("iCloud", Kind::Dir, 0);
+        placeholder.cloud = true;
+        let dirs = t.add_children(ROOT, vec![placeholder, entry("local", Kind::Dir, 0)]);
+
+        // Only the real directory is handed back for walking, and the walker
+        // relies on that list lining up with the paths it collected.
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(t.nodes[dirs[0] as usize].name.as_ref(), "local");
+
+        let view = t.children_view(ROOT, false, 10).unwrap();
+        let cloud = view.children.iter().find(|c| c.name == "iCloud").unwrap();
+        assert!(cloud.cloud);
+        // Marked read so the UI does not show it as still being scanned.
+        assert!(cloud.read);
     }
 
     #[test]
