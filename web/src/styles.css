@@ -451,6 +451,17 @@ button {
   font-style: italic;
 }
 
+.row-up {
+  cursor: pointer;
+  color: var(--fg-dim);
+}
+.row-up:hover {
+  color: var(--fg);
+}
+.row-up .row-name {
+  letter-spacing: 0.08em;
+}
+
 /* ---------- treemap ---------- */
 
 .treemap {

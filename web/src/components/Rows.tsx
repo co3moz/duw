@@ -29,6 +29,7 @@ export function FolderRows({
   selected,
   onSelect,
   onOpen,
+  onUp,
 }: {
   entries: Entry[]
   other: Rollup
@@ -37,12 +38,22 @@ export function FolderRows({
   selected: number | null
   onSelect: (id: number) => void
   onOpen: (id: number) => void
+  /// Absent at the scan root, where there is nowhere to go up to.
+  onUp?: () => void
 }) {
-  if (!entries.length && !other.count) {
-    return <p className="empty">Nothing here yet.</p>
-  }
   return (
     <ul className="rows">
+      {onUp && (
+        <li className="row row-up" onClick={onUp} title="Go up one level">
+          <span className="row-icon">↑</span>
+          <span className="row-name">..</span>
+          <span className="row-meta" />
+          <span />
+          <span />
+          <span />
+        </li>
+      )}
+      {!entries.length && !other.count && <li className="empty">Nothing here yet.</li>}
       {entries.map((e) => {
         const v = value(e, metric)
         const cat: Category = e.kind === 'dir' ? 'folder' : categoryOf(e.ext)

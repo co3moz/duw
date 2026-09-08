@@ -165,6 +165,7 @@ export default function App() {
                 selected={selected}
                 onSelect={setSelected}
                 onOpen={open}
+                onUp={view.breadcrumb.length > 1 ? up : undefined}
               />
             )}
             {tab === 'types' &&
