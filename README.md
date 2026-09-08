@@ -12,6 +12,10 @@ duw /var/log
 streams progress to a local page. You can click into folders, sort by apparent
 or on-disk size, and see where the space went before the scan has finished.
 
+![The duw report: a folder list on the left, a treemap on the right](docs/screenshot.png)
+
+<sub>Screenshot of a made-up archive; the colours group files by kind.</sub>
+
 ## The UI
 
 - **Folders**, every entry in the current directory, largest first, with a

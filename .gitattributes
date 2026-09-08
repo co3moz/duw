@@ -1,0 +1,11 @@
+# Normalize to LF in the repository and in every working copy. The Rust and
+# Node toolchains are line-ending agnostic, so there is no reason to let
+# checkouts diverge between platforms.
+* text=auto eol=lf
+
+# Binary assets must never be touched.
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
