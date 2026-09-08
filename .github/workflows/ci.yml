@@ -81,6 +81,35 @@ jobs:
           curl -sf 'http://127.0.0.1:8099/api/types/0' | grep -q '"types"'
           curl -sf -X POST http://127.0.0.1:8099/api/cancel -o /dev/null
 
+      # An open SSE stream used to keep the graceful shutdown waiting forever,
+      # so an open browser tab made Ctrl+C do nothing. Sending a real signal is
+      # only straightforward on Unix, hence the skip.
+      - name: Ctrl+C with a live SSE client
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target/release/duw --no-open --port 8100 --max-depth 2 src &
+          PID=$!
+          sleep 1
+          curl -sN http://127.0.0.1:8100/api/events >/dev/null &
+          CURL=$!
+          trap 'kill $PID $CURL 2>/dev/null || true' EXIT
+          sleep 1
+
+          kill -INT $PID
+          for _ in $(seq 1 20); do
+            kill -0 $PID 2>/dev/null || break
+            sleep 0.5
+          done
+
+          if kill -0 $PID 2>/dev/null; then
+            echo "the process survived SIGINT while an SSE client was attached"
+            exit 1
+          fi
+          echo "shut down cleanly"
+
   lint:
     name: fmt + clippy
     runs-on: ubuntu-latest

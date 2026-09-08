@@ -8,6 +8,7 @@ mod tree;
 use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use globset::{Glob, GlobSetBuilder};
@@ -50,9 +51,12 @@ fn run() -> Result<(), String> {
 
     let scanner = Scanner::new(opts).map_err(|e| format!("cannot scan {}: {e}", root.display()))?;
 
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
     let state = AppState {
         scanner: Arc::clone(&scanner),
         root: root.display().to_string(),
+        shutdown: shutdown_rx,
     };
 
     // The walker is CPU/IO bound and fully synchronous; keep it off the async
@@ -94,7 +98,7 @@ fn run() -> Result<(), String> {
         }
 
         axum::serve(listener, server::router(state))
-            .with_graceful_shutdown(shutdown())
+            .with_graceful_shutdown(shutdown(shutdown_tx))
             .await
             .map_err(|e| format!("server error: {e}"))?;
 
@@ -138,7 +142,20 @@ fn build_excludes(args: &Args) -> Result<Option<globset::GlobSet>, String> {
         .map_err(|e| format!("cannot build exclude set: {e}"))
 }
 
-async fn shutdown() {
+/// Grace period before a stuck connection stops being the process's problem.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+
+async fn shutdown(streams: tokio::sync::watch::Sender<bool>) {
     let _ = tokio::signal::ctrl_c().await;
     println!("\nduw: shutting down");
+
+    // Tell the SSE handlers to end their responses, otherwise the graceful
+    // shutdown below waits for browser tabs that will never disconnect.
+    let _ = streams.send(true);
+
+    tokio::spawn(async {
+        tokio::time::sleep(SHUTDOWN_GRACE).await;
+        eprintln!("duw: a connection would not close, exiting anyway");
+        std::process::exit(0);
+    });
 }

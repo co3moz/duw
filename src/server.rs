@@ -12,6 +12,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::{Stream, StreamExt};
 
@@ -30,6 +31,8 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 pub struct AppState {
     pub scanner: Arc<Scanner>,
     pub root: String,
+    /// Flipped to `true` on Ctrl+C so long-lived responses can end themselves.
+    pub shutdown: watch::Receiver<bool>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -109,14 +112,23 @@ async fn state_handler(State(state): State<AppState>) -> Json<FullState> {
 async fn events(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = IntervalStream::new(tokio::time::interval(PROGRESS_INTERVAL)).map(move |_| {
-        let p = progress_of(&state);
-        let name = if p.scanning { "progress" } else { "done" };
-        Ok(Event::default()
-            .event(name)
-            .json_data(p)
-            .unwrap_or_else(|_| Event::default().comment("serialization failed")))
-    });
+    let shutdown = state.shutdown.clone();
+
+    // This response would otherwise never end, and a graceful shutdown waits
+    // for every in-flight response: an open browser tab would keep Ctrl+C from
+    // ever stopping the process. Ending the stream on the next tick after the
+    // signal closes that door.
+    let stream = IntervalStream::new(tokio::time::interval(PROGRESS_INTERVAL))
+        .take_while(move |_| !*shutdown.borrow())
+        .map(move |_| {
+            let p = progress_of(&state);
+            let name = if p.scanning { "progress" } else { "done" };
+            Ok(Event::default()
+                .event(name)
+                .json_data(p)
+                .unwrap_or_else(|_| Event::default().comment("serialization failed")))
+        });
+
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
