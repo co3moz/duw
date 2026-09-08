@@ -1,5 +1,7 @@
 # duw
 
+[![CI](https://github.com/co3moz/duw/actions/workflows/ci.yml/badge.svg)](https://github.com/co3moz/duw/actions/workflows/ci.yml)
+
 `du`, but the report lands in your browser while the scan is still running.
 
 ```bash
