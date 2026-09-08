@@ -1,0 +1,8 @@
+/target
+/web/node_modules
+/web/.vite
+/web/tsconfig.tsbuildinfo
+*.log
+
+# web/dist is intentionally committed: it is embedded in the binary, so
+# `cargo install duw` must work without a Node toolchain.

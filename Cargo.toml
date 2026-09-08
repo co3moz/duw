@@ -1,0 +1,42 @@
+[package]
+name = "duw"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Disk usage analyzer that streams its results to a local web UI"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/co3moz/duw"
+keywords = ["du", "disk", "usage", "cli", "treemap"]
+categories = ["command-line-utilities", "filesystem"]
+# Leading slashes matter: unanchored patterns such as `LICENSE*` would also
+# match every copy inside web/node_modules.
+include = [
+    "/src/**/*",
+    "/web/dist/**/*",
+    "/build.rs",
+    "/README.md",
+    "/LICENSE",
+]
+
+[dependencies]
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+dunce = "1"
+globset = "0.4"
+opener = "0.7"
+rayon = "1"
+rust-embed = { version = "8", features = ["mime-guess"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
+tokio-stream = { version = "0.1", features = ["time"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
