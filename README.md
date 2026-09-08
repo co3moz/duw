@@ -5,7 +5,6 @@
 `du`, but the report lands in your browser while the scan is still running.
 
 ```bash
-cargo install duw
 duw            # scans the current directory and opens the UI
 duw /var/log
 ```
@@ -15,6 +14,26 @@ streams progress to a local page. You can click into folders, sort by apparent
 or on-disk size, and see where the space went before the scan has finished.
 
 ![The duw report: a folder list on the left, a treemap on the right](docs/screenshot.png)
+
+## Install
+
+Every release ships prebuilt binaries for Linux (x86_64 and aarch64), macOS
+(Intel and Apple silicon) and Windows (x86_64):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/co3moz/duw/master/install.sh | sh
+```
+
+The script picks the archive for your platform, checks it against the release's
+`SHA256SUMS` and installs into `~/.local/bin`. Override with `DUW_INSTALL_DIR`,
+or pin a version with `DUW_VERSION=v0.1.0`. On Windows, take the `.zip` from the
+[releases page](https://github.com/co3moz/duw/releases/latest).
+
+With Cargo instead:
+
+```bash
+cargo install duw
+```
 
 ## The UI
 
