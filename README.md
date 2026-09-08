@@ -2,34 +2,29 @@
 
 [![CI](https://github.com/co3moz/duw/actions/workflows/ci.yml/badge.svg)](https://github.com/co3moz/duw/actions/workflows/ci.yml)
 
-`du`, but the report lands in your browser while the scan is still running.
+`du` for the browser.
 
 ```bash
 duw            # scans the current directory and opens the UI
 duw /var/log
 ```
 
-`duw` walks the tree on all your cores, aggregates sizes upwards as it goes and
-streams progress to a local page. You can click into folders, sort by apparent
-or on-disk size, and see where the space went before the scan has finished.
+It scans a folder and shows what is using the space, updating while the scan
+runs.
 
 ![The duw report: a folder list on the left, a treemap on the right](docs/screenshot.png)
 
 ## Install
 
-Every release ships prebuilt binaries for Linux (x86_64 and aarch64), macOS
-(Intel and Apple silicon) and Windows (x86_64):
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/co3moz/duw/master/install.sh | sh
 ```
 
-The script picks the archive for your platform, checks it against the release's
-`SHA256SUMS` and installs into `~/.local/bin`. Override with `DUW_INSTALL_DIR`,
-or pin a version with `DUW_VERSION=v0.1.0`. On Windows, take the `.zip` from the
+Linux, macOS and Windows, on x86_64 and arm64. The script installs into
+`~/.local/bin`. On Windows, download the `.zip` from the
 [releases page](https://github.com/co3moz/duw/releases/latest).
 
-With Cargo instead:
+Or with Cargo:
 
 ```bash
 cargo install duw
@@ -37,35 +32,18 @@ cargo install duw
 
 ## The UI
 
-- **Folders**, every entry in the current directory, largest first, with a
-  share bar. Directories that usually hold regenerable data (`node_modules`,
-  `target`, `.git`, `__pycache__`, …) get a badge.
-- **File types**, the whole subtree grouped by category and extension.
-- **Largest files**, the hundred biggest files anywhere below the current
-  directory.
-- **Treemap**, three levels deep, click a rectangle to descend. Trimmed
-  entries show up as an explicit "… N more" cell rather than inflating their
-  siblings.
+- **Folders**: every item in the current folder, biggest first, with a bar that
+  shows its share. Folders that usually hold files you can rebuild
+  (`node_modules`, `target`, `.git`, `__pycache__`, and so on) get a small
+  label.
+- **File types**: everything below the current folder, grouped by category and
+  by file extension.
+- **Largest files**: the 100 biggest files below the current folder.
+- **Treemap**: three levels deep. Click a rectangle to go into it.
 
-`Backspace` or `Escape` goes up a level. Nothing is uploaded anywhere; the
-server binds to `127.0.0.1` and stops when you press `Ctrl+C`.
-
-## Apparent vs on-disk size
-
-The toggle in the header switches between the two, the way `du --apparent-size`
-and plain `du` differ:
-
-| | apparent | on disk |
-|---|---|---|
-| Unix | `st_size` | `st_blocks × 512`, exact |
-| Windows | file size | rounded up to the volume cluster size, an estimate |
-
-Windows has no cheap per-file allocation size, so `duw` rounds instead of paying
-an extra syscall per file. That is exact for ordinary files and overstates
-compressed or sparse ones; the UI marks the column with `*` when it applies.
-
-Hard links are counted once on Unix (pass `-l` to count every link, like `du -l`).
-Windows does not expose link counts cheaply, so every link is counted there.
+Press `Backspace` or `Escape` to go up one level. Nothing is sent over the
+internet. The server listens on `127.0.0.1` only, and it stops when you press
+`Ctrl+C`.
 
 ## Options
 
@@ -89,44 +67,26 @@ duw --exclude '*/node_modules' --exclude '.git' ~/src
 duw -d 2 --no-open -p 8080 /
 ```
 
-## HTTP API
-
-The page is a client of a small JSON API, so the same data is scriptable:
-
-| Endpoint | Returns |
-|---|---|
-| `GET /api/state` | root path, platform capabilities, live counters |
-| `GET /api/events` | SSE stream of `progress` / `done` frames |
-| `GET /api/node/{id}` | one directory's children, largest first |
-| `GET /api/tree/{id}` | nested slice for the treemap |
-| `GET /api/types/{id}` | subtree totals per extension |
-| `GET /api/largest/{id}` | biggest files in the subtree |
-| `GET /api/errors` | entries that could not be read |
-| `POST /api/cancel` | stop the walk, keep the results |
-
-Node `0` is always the scan root. `metric=size\|alloc` selects apparent or
-on-disk sizes; `version` increases on every batch of newly scanned entries,
-which is how the UI knows when to refetch.
-
 ## Building from source
 
-The web UI is a Vite + React app whose build output is embedded in the binary,
-so a release build needs no Node at install time, `web/dist` is committed.
+The web UI is a Vite + React app. Its build output goes to `web/dist`. That
+folder is committed to the repository and built into the binary, which is why a
+release build does not need Node.
 
 ```bash
-cd web && npm install && npm run build   # only after changing the UI
+cd web && npm install && npm run build   # only if you changed the UI
 cargo build --release
 ```
 
-For UI work, run the backend and the dev server side by side; Vite proxies
-`/api` to port 8080:
+To work on the UI, run the backend and the dev server at the same time. Vite
+sends `/api` requests to port 8080:
 
 ```bash
 cargo run -- --port 8080 --no-open ~/src
 cd web && npm run dev
 ```
 
-Debug builds read `web/dist` from disk, release builds embed it.
+Debug builds read `web/dist` from disk. Release builds embed it.
 
 ## License
 
