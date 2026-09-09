@@ -442,6 +442,52 @@ impl Tree {
             .collect()
     }
 
+    /// Files under `id` worth considering as duplicate candidates: real files
+    /// of at least `min_size` whose bytes are actually on this disk. Paths are
+    /// built during the walk rather than looked up per file.
+    ///
+    /// Cloud placeholders are always excluded. Reading one would make the sync
+    /// filter download it, which is the opposite of what a disk usage tool
+    /// should do.
+    pub fn duplicate_candidates(&self, id: u32, min_size: u64) -> Vec<Candidate> {
+        let mut out = Vec::new();
+        if self.get(id).is_some() {
+            self.collect_candidates(id, min_size, &mut String::new(), &mut out);
+        }
+        out
+    }
+
+    fn collect_candidates(
+        &self,
+        id: u32,
+        min_size: u64,
+        prefix: &mut String,
+        out: &mut Vec<Candidate>,
+    ) {
+        for &child in &self.nodes[id as usize].children {
+            let n = &self.nodes[child as usize];
+            let mark = prefix.len();
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(&n.name);
+
+            match n.kind {
+                Kind::Dir => self.collect_candidates(child, min_size, prefix, out),
+                Kind::File if !n.cloud && !n.err && n.self_size >= min_size => {
+                    out.push(Candidate {
+                        id: child,
+                        size: n.self_size,
+                        path: prefix.clone(),
+                    })
+                }
+                _ => {}
+            }
+
+            prefix.truncate(mark);
+        }
+    }
+
     fn for_each_file<F: FnMut(&Node)>(&self, id: u32, mut f: F) {
         let mut stack = vec![id];
         while let Some(cur) = stack.pop() {
@@ -494,6 +540,14 @@ pub struct Rollup {
 pub struct ChildrenView {
     pub children: Vec<Entry>,
     pub other: Rollup,
+}
+
+/// A file the duplicate scanner may need to read.
+pub struct Candidate {
+    pub id: u32,
+    pub size: u64,
+    /// Path relative to the scan root.
+    pub path: String,
 }
 
 #[derive(Serialize)]
@@ -612,6 +666,37 @@ mod tests {
         assert!(cloud.cloud);
         // Marked read so the UI does not show it as still being scanned.
         assert!(cloud.read);
+    }
+
+    #[test]
+    fn duplicate_candidates_skip_cloud_and_small_files() {
+        let mut t = Tree::new("root".into(), 0, 0, 0);
+        let mut remote = entry("remote.bin", Kind::File, 5_000_000);
+        remote.cloud = true;
+
+        let dirs = t.add_children(
+            ROOT,
+            vec![
+                entry("sub", Kind::Dir, 0),
+                entry("local.bin", Kind::File, 5_000_000),
+                remote,
+                entry("tiny.bin", Kind::File, 10),
+            ],
+        );
+        t.add_children(dirs[0], vec![entry("deep.bin", Kind::File, 5_000_000)]);
+
+        let mut found: Vec<String> = t
+            .duplicate_candidates(ROOT, 1000)
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        found.sort();
+
+        // The cloud placeholder is absent: reading it would download it.
+        assert_eq!(
+            found,
+            vec!["local.bin".to_string(), "sub/deep.bin".to_string()]
+        );
     }
 
     #[test]

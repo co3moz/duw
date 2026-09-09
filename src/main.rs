@@ -1,5 +1,6 @@
 mod assets;
 mod cli;
+mod dupes;
 mod fsext;
 mod scan;
 mod server;
@@ -14,6 +15,7 @@ use clap::Parser;
 use globset::{Glob, GlobSetBuilder};
 
 use crate::cli::Args;
+use crate::dupes::Dupes;
 use crate::scan::{ScanOpts, Scanner};
 use crate::server::AppState;
 
@@ -57,19 +59,33 @@ fn run() -> Result<(), String> {
     let scanner = Scanner::new(opts).map_err(|e| format!("cannot scan {}: {e}", root.display()))?;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let dupes = Dupes::new(Arc::clone(&scanner.tree), root.clone());
 
     let state = AppState {
         scanner: Arc::clone(&scanner),
+        dupes: Arc::clone(&dupes),
         root: root.display().to_string(),
+        local_only: args.local_only && fsext::CLOUD_DETECTION_SUPPORTED,
+        dupes_min: args.duplicates_min,
         shutdown: shutdown_rx,
     };
 
     // The walker is CPU/IO bound and fully synchronous; keep it off the async
     // runtime so progress requests stay responsive.
     let worker = Arc::clone(&scanner);
+    let auto_dupes = args.duplicates.then_some(args.duplicates_min);
     std::thread::Builder::new()
         .name("duw-scan".into())
-        .spawn(move || worker.run())
+        .spawn(move || {
+            worker.run();
+            // Duplicate detection needs the whole tree, so it waits for the
+            // walk rather than racing it.
+            if let Some(min) = auto_dupes {
+                if !worker.is_cancelled() {
+                    dupes.start(tree::ROOT, min);
+                }
+            }
+        })
         .map_err(|e| format!("cannot start scanner: {e}"))?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

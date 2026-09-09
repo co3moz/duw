@@ -465,6 +465,113 @@ button {
   letter-spacing: 0.08em;
 }
 
+/* ---------- duplicates ---------- */
+
+.dupes {
+  padding: 0 6px;
+}
+
+.dupes-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 2px 2px 10px;
+}
+
+.dupes-min {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-faint);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.dupes-min select {
+  font: inherit;
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+.dupes-min select:disabled {
+  opacity: 0.5;
+}
+
+.dupes-run {
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--accent);
+}
+.dupes-run:hover {
+  background: var(--bg-hover);
+}
+
+.dupes-summary {
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+.dupes-summary strong {
+  color: var(--accent);
+}
+
+.dupes-progress {
+  display: grid;
+  gap: 4px;
+  padding: 4px 2px 12px;
+}
+.dupes-phase {
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+
+.dupe-group {
+  padding: 6px 8px;
+  border-radius: 4px;
+}
+.dupe-group:hover {
+  background: var(--bg-hover);
+}
+.dupe-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.dupe-count {
+  font-weight: 600;
+}
+.dupe-each {
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+.dupe-wasted {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--warn);
+}
+.dupe-files {
+  list-style: none;
+  margin: 3px 0 0;
+  padding: 0;
+}
+.dupe-files li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-dim);
+  font-size: 12px;
+  padding-left: 12px;
+  /* Long paths matter at the end, where the file name is. */
+  direction: rtl;
+  text-align: left;
+}
+
 /* ---------- treemap ---------- */
 
 .treemap {

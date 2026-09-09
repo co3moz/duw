@@ -195,21 +195,28 @@ impl Scanner {
             };
 
             // Cloud placeholders report their full size but occupy nothing
-            // here. With --local-only they are listed at zero and, for
-            // directories, never opened.
-            let cloud = self.opts.local_only && fsext::is_cloud_backed(&md, &child);
+            // here. Files are always classified, whether or not --local-only
+            // was given, because the duplicate scanner must never read one:
+            // that would make the sync filter download it. Directories only
+            // need the check when the filter is on, and it costs a syscall.
+            let cloud = if kind == Kind::Dir {
+                self.opts.local_only && fsext::is_cloud_backed(&md, &child)
+            } else {
+                fsext::is_cloud_backed(&md, &child)
+            };
+            let filtered = cloud && self.opts.local_only;
 
             if kind == Kind::Dir {
                 if self.opts.one_file_system && fsext::device(&md) != self.root_device {
                     skipped += 1;
                     continue;
                 }
-                if recurse && !cloud {
+                if recurse && !filtered {
                     subdirs.push(child);
                 }
             }
 
-            if cloud {
+            if filtered {
                 entries.push(NewEntry {
                     name,
                     kind,
@@ -241,7 +248,7 @@ impl Scanner {
                 alloc,
                 mtime: fsext::mtime(&md),
                 err: false,
-                cloud: false,
+                cloud,
             });
         }
 

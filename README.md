@@ -39,6 +39,9 @@ cargo install duw
 - **File types**: everything below the current folder, grouped by category and
   by file extension.
 - **Largest files**: the 100 biggest files below the current folder.
+- **Duplicates**: files with identical contents, grouped and sorted by how
+  much deleting the copies would free. This one reads file contents, so it only
+  runs when you ask for it.
 - **Treemap**: three levels deep. Click a rectangle to go into it.
 
 Press `Backspace` or `Escape` to go up one level. Nothing is sent over the
@@ -63,6 +66,8 @@ duw [OPTIONS] [PATH]
       --exclude <PATTERN>  Exclude entries matching a glob (repeatable)
   -X, --exclude-from <F>   Read exclude patterns from a file
   -j, --threads <N>        Scanning threads [default: number of cores]
+      --duplicates         Look for duplicate files once the scan finishes
+      --duplicates-min <S> Smallest file to consider, e.g. 512K, 10M [default: 512K]
 ```
 
 ```bash

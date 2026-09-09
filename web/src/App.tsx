@@ -4,8 +4,9 @@ import { bytes, count, duration } from './format'
 import { useLive, useResource, useThrottled } from './useLive'
 import { Treemap } from './components/Treemap'
 import { FolderRows, LargestRows, TypeRows } from './components/Rows'
+import { Duplicates } from './components/Duplicates'
 
-type Tab = 'folders' | 'types' | 'largest'
+type Tab = 'folders' | 'types' | 'largest' | 'duplicates'
 
 const LIST_LIMIT = 500
 const MAP_DEPTH = 3
@@ -37,6 +38,27 @@ export default function App() {
   const largest = useResource(
     (s) => (tab === 'largest' ? api.largest(nodeId, metric, 100, s) : Promise.resolve(null)),
     [nodeId, tab, metric, version],
+  )
+
+  const dupes = progress?.dupes
+  const [minSize, setMinSize] = useState<number | null>(null)
+  // Results are only fetched once a run settles; while it runs the SSE stream
+  // already carries everything the progress display needs.
+  const dupeResults = useResource(
+    (s) =>
+      tab === 'duplicates' && dupes && dupes.phase !== 'idle'
+        ? api.duplicates(nodeId, 200, s)
+        : Promise.resolve(null),
+    [nodeId, tab, dupes?.generation, dupes?.phase],
+  )
+
+  const effectiveMin = minSize ?? state?.dupes_min ?? 524288
+  const runDupes = useCallback(
+    (min: number) => {
+      setMinSize(min)
+      api.startDuplicates(nodeId, min)
+    },
+    [nodeId],
   )
 
   const open = useCallback((id: number) => {
@@ -154,6 +176,12 @@ export default function App() {
             <button className={tab === 'largest' ? 'on' : ''} onClick={() => setTab('largest')}>
               largest files
             </button>
+            <button
+              className={tab === 'duplicates' ? 'on' : ''}
+              onClick={() => setTab('duplicates')}
+            >
+              duplicates
+            </button>
           </div>
           <div className="panel-body">
             {tab === 'folders' && (
@@ -180,6 +208,20 @@ export default function App() {
               ) : (
                 <p className="empty">aggregating…</p>
               ))}
+            {tab === 'duplicates' && dupes && (
+              <Duplicates
+                progress={dupes}
+                groups={dupeResults.data?.groups ?? []}
+                truncated={dupeResults.data?.truncated ?? false}
+                totalGroups={dupeResults.data?.total_groups ?? 0}
+                minSize={effectiveMin}
+                scopeName={view.name}
+                matchesScope={dupes.scope === nodeId && dupes.phase !== 'idle'}
+                onMinSize={runDupes}
+                onScan={() => runDupes(effectiveMin)}
+                onCancel={() => api.cancelDuplicates()}
+              />
+            )}
           </div>
         </section>
 

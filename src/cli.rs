@@ -57,4 +57,43 @@ pub struct Args {
     /// Number of scanning threads (defaults to the number of cores).
     #[arg(short = 'j', long, value_name = "N")]
     pub threads: Option<usize>,
+
+    /// Look for duplicate files once the scan finishes.
+    #[arg(long)]
+    pub duplicates: bool,
+
+    /// Smallest file the duplicate scanner considers, e.g. 512K, 10M, 1G.
+    #[arg(long, value_name = "SIZE", default_value = "512K", value_parser = parse_size)]
+    pub duplicates_min: u64,
+}
+
+/// Accepts a plain byte count or a K/M/G suffix, the way `du -t` does.
+fn parse_size(text: &str) -> Result<u64, String> {
+    let text = text.trim();
+    let (digits, scale) = match text.chars().last() {
+        Some('k' | 'K') => (&text[..text.len() - 1], 1024),
+        Some('m' | 'M') => (&text[..text.len() - 1], 1024 * 1024),
+        Some('g' | 'G') => (&text[..text.len() - 1], 1024 * 1024 * 1024),
+        _ => (text, 1),
+    };
+    digits
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| format!("{text:?} is not a size"))?
+        .checked_mul(scale)
+        .ok_or_else(|| format!("{text:?} is too large"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_size;
+
+    #[test]
+    fn sizes_accept_suffixes() {
+        assert_eq!(parse_size("512K"), Ok(524288));
+        assert_eq!(parse_size("10m"), Ok(10 * 1024 * 1024));
+        assert_eq!(parse_size("4096"), Ok(4096));
+        assert!(parse_size("nope").is_err());
+        assert!(parse_size("99999999999999999999G").is_err());
+    }
 }

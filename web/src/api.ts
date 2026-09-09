@@ -11,6 +11,33 @@ export interface Stats {
   hardlinks: number
 }
 
+export type DupePhase = 'idle' | 'grouping' | 'windowing' | 'hashing' | 'done' | 'cancelled'
+
+export interface DupeProgress {
+  phase: DupePhase
+  scope: number
+  min_size: number
+  candidates: number
+  read: number
+  bytes_read: number
+  bytes_total: number
+  groups: number
+  wasted: number
+  elapsed_ms: number
+  generation: number
+}
+
+export interface DupeFile {
+  id: number
+  path: string
+}
+
+export interface DupeGroup {
+  size: number
+  wasted: number
+  files: DupeFile[]
+}
+
 export interface Progress {
   version: number
   scanning: boolean
@@ -20,6 +47,7 @@ export interface Progress {
   stats: Stats
   root_size: number
   root_alloc: number
+  dupes: DupeProgress
 }
 
 export interface Platform {
@@ -33,6 +61,8 @@ export interface FullState extends Progress {
   root: string
   root_id: number
   platform: Platform
+  local_only: boolean
+  dupes_min: number
 }
 
 export interface Entry {
@@ -138,4 +168,17 @@ export const api = {
   errors: (signal?: AbortSignal) => get<ScanError[]>('/api/errors', signal),
 
   cancel: () => fetch('/api/cancel', { method: 'POST' }),
+
+  duplicates: (id: number, limit: number, signal?: AbortSignal) =>
+    get<{
+      progress: DupeProgress
+      groups: DupeGroup[]
+      total_groups: number
+      truncated: boolean
+    }>(`/api/duplicates/${id}?limit=${limit}`, signal),
+
+  startDuplicates: (id: number, min: number) =>
+    fetch(`/api/duplicates/${id}?min=${min}`, { method: 'POST' }),
+
+  cancelDuplicates: () => fetch('/api/duplicates/cancel', { method: 'POST' }),
 }

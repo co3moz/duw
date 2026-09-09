@@ -17,6 +17,7 @@ use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::assets;
+use crate::dupes::{DupeGroup, DupeProgress, Dupes};
 use crate::fsext;
 use crate::scan::Scanner;
 use crate::tree::{Crumb, Entry, ExtStat, LargeFile, Rollup, Stats, SubtreeNode};
@@ -30,7 +31,11 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 #[derive(Clone)]
 pub struct AppState {
     pub scanner: Arc<Scanner>,
+    pub dupes: Arc<Dupes>,
     pub root: String,
+    pub local_only: bool,
+    /// Threshold the UI starts from; it can ask for a different one.
+    pub dupes_min: u64,
     /// Flipped to `true` on Ctrl+C so long-lived responses can end themselves.
     pub shutdown: watch::Receiver<bool>,
 }
@@ -45,6 +50,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/largest/{id}", get(largest))
         .route("/api/errors", get(errors))
         .route("/api/cancel", post(cancel))
+        .route(
+            "/api/duplicates/{id}",
+            get(duplicates).post(start_duplicates),
+        )
+        .route("/api/duplicates/cancel", post(cancel_duplicates))
         .fallback(assets::serve)
         .with_state(state)
 }
@@ -59,6 +69,7 @@ struct Progress {
     stats: Stats,
     root_size: u64,
     root_alloc: u64,
+    dupes: DupeProgress,
 }
 
 #[derive(Serialize)]
@@ -66,6 +77,10 @@ struct FullState {
     root: String,
     root_id: u32,
     platform: Platform,
+    /// Whether the scan was run with --local-only, so the UI knows when the
+    /// cloud markers on entries are actually being acted on.
+    local_only: bool,
+    dupes_min: u64,
     #[serde(flatten)]
     progress: Progress,
 }
@@ -92,6 +107,7 @@ fn progress_of(state: &AppState) -> Progress {
         stats: t.stats.clone(),
         root_size: root.total_size,
         root_alloc: root.total_alloc,
+        dupes: state.dupes.progress(),
     }
 }
 
@@ -105,6 +121,8 @@ async fn state_handler(State(state): State<AppState>) -> Json<FullState> {
             hardlink_dedup: fsext::HARDLINK_DEDUP_SUPPORTED,
             approximate_alloc: cfg!(windows),
         },
+        local_only: state.local_only,
+        dupes_min: state.dupes_min,
         progress: progress_of(&state),
     })
 }
@@ -290,5 +308,65 @@ async fn errors(State(state): State<AppState>) -> impl IntoResponse {
 
 async fn cancel(State(state): State<AppState>) -> impl IntoResponse {
     state.scanner.cancel();
+    StatusCode::ACCEPTED
+}
+
+#[derive(Deserialize)]
+struct DupeQuery {
+    /// Smallest file to consider; defaults to whatever the CLI was given.
+    min: Option<u64>,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct DupesResponse {
+    progress: DupeProgress,
+    groups: Vec<DupeGroup>,
+    total_groups: usize,
+    truncated: bool,
+}
+
+/// Reads whatever the duplicate scanner has produced so far. The scan itself is
+/// started separately, so polling this while it runs is cheap.
+async fn duplicates(
+    State(state): State<AppState>,
+    Path(id): Path<u32>,
+    Query(q): Query<DupeQuery>,
+) -> impl IntoResponse {
+    if state.scanner.tree.read().unwrap().get(id).is_none() {
+        return (StatusCode::NOT_FOUND, "no such node").into_response();
+    }
+    let limit = q.limit.unwrap_or(200).clamp(1, 5000);
+    let mut groups = state.dupes.groups();
+    let total_groups = groups.len();
+    let truncated = total_groups > limit;
+    groups.truncate(limit);
+
+    Json(DupesResponse {
+        progress: state.dupes.progress(),
+        groups,
+        total_groups,
+        truncated,
+    })
+    .into_response()
+}
+
+/// Starts (or restarts) a duplicate scan for one directory. Changing the
+/// threshold from the UI lands here, and cached digests make a rerun cheap.
+async fn start_duplicates(
+    State(state): State<AppState>,
+    Path(id): Path<u32>,
+    Query(q): Query<DupeQuery>,
+) -> impl IntoResponse {
+    if state.scanner.tree.read().unwrap().get(id).is_none() {
+        return (StatusCode::NOT_FOUND, "no such node").into_response();
+    }
+    let min = q.min.unwrap_or(state.dupes_min);
+    state.dupes.start(id, min);
+    Json(state.dupes.progress()).into_response()
+}
+
+async fn cancel_duplicates(State(state): State<AppState>) -> impl IntoResponse {
+    state.dupes.cancel();
     StatusCode::ACCEPTED
 }

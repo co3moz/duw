@@ -139,7 +139,11 @@ mod imp {
         // Placeholder directories carry nothing but a reparse point, so the tag
         // has to be read to tell a cloud root from a junction or a container
         // mount. Only reparse points get this extra call, and they are rare.
-        if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        //
+        // Files are deliberately not classified this way: one that still has a
+        // cloud tag but no recall flag has been downloaded, and its bytes do
+        // sit on this disk.
+        if md.is_dir() && attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             return matches!(reparse_tag(path), Some(tag) if is_cloud_tag(tag));
         }
         false

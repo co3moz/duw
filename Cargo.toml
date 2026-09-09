@@ -21,6 +21,7 @@ include = [
 
 [dependencies]
 axum = "0.8"
+blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 dunce = "1"
 globset = "0.4"
