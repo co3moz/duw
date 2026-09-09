@@ -1,20 +1,32 @@
 name: Release
 
-# Manual only: pick the tag, the workflow builds every target and publishes
-# them as a GitHub release that install.sh can pull from.
+# Pushing a v* tag builds every target and publishes them as a GitHub release
+# that install.sh can pull from. The manual trigger is kept for reruns and for
+# releasing a tag that already exists.
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release, e.g. v0.1.0 (must match the version in Cargo.toml)"
-        required: true
+        description: "Tag to release, e.g. v0.1.0. Defaults to the ref this runs on."
+        required: false
         type: string
 
 permissions:
   contents: write
 
+# Never let two runs publish the same release at once, and never cancel one
+# halfway through: a partial release is worse than a slow one.
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
+  # `inputs` is empty on a tag push, so this falls back to the tag name.
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -41,14 +53,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A tag that disagrees with Cargo.toml would ship binaries reporting the
+      # wrong --version, so stop before building anything.
       - name: Check the tag matches Cargo.toml
         shell: bash
         run: |
           set -euo pipefail
-          want='${{ inputs.tag }}'
           have="v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
-          if [ "$want" != "$have" ]; then
-            echo "tag $want does not match the version in Cargo.toml ($have)"
+          if [ "$TAG" != "$have" ]; then
+            echo "tag $TAG does not match the version in Cargo.toml ($have)"
             exit 1
           fi
 
@@ -107,10 +120,21 @@ jobs:
           sed -i 's|\./||' SHA256SUMS
           cat SHA256SUMS
 
+      # Reruns must not fail on an existing release, so an already published
+      # tag gets its assets replaced instead.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create '${{ inputs.tag }}' dist/* \
-            --title '${{ inputs.tag }}' \
-            --generate-notes
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists, replacing its assets"
+            gh release upload "$TAG" dist/* --clobber
+          else
+            # --target pins the release to the commit that was built, which
+            # matters when the tag does not exist yet on a manual run.
+            gh release create "$TAG" dist/* \
+              --title "$TAG" \
+              --target "$GITHUB_SHA" \
+              --generate-notes
+          fi
