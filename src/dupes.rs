@@ -223,7 +223,9 @@ impl Dupes {
                 refined.push(group);
                 continue;
             }
-            for bucket in self.split_by(group, generation, |this, c| this.window_digest(c)) {
+            for bucket in self.split_by(group, generation, |this, c| {
+                this.window_digest(c, generation)
+            }) {
                 refined.push(bucket);
             }
         }
@@ -240,7 +242,9 @@ impl Dupes {
                 return false;
             }
             let size = group[0].size;
-            for bucket in self.split_by(group, generation, |this, c| this.full_digest(c)) {
+            for bucket in
+                self.split_by(group, generation, |this, c| this.full_digest(c, generation))
+            {
                 let wasted = size * (bucket.len() as u64 - 1);
                 groups.push(DupeGroup {
                     size,
@@ -263,7 +267,18 @@ impl Dupes {
         let total_wasted: u64 = groups.iter().map(|g| g.wasted).sum();
         let group_count = groups.len() as u64;
 
-        *self.groups.write().unwrap() = groups;
+        {
+            // Checking the generation while holding the same lock `start`
+            // uses to clear the results keeps a superseded run from overwriting
+            // the new one's (empty) list. `start` bumps the generation before
+            // it clears, so a worker that gets the lock afterwards sees a
+            // mismatched generation and gives up.
+            let mut g = self.groups.write().unwrap();
+            if self.stale(generation) {
+                return false;
+            }
+            *g = groups;
+        }
         self.update(generation, |p| {
             p.groups = group_count;
             p.wasted = total_wasted;
@@ -304,30 +319,34 @@ impl Dupes {
         p
     }
 
-    fn window_digest(&self, c: &Candidate) -> Option<Digest> {
+    fn window_digest(&self, c: &Candidate, generation: u64) -> Option<Digest> {
         if let Some(d) = self.window.lock().unwrap().get(&c.id) {
             return Some(*d);
         }
         let d = hash_windows(&self.path_of(c), c.size)?;
         self.window.lock().unwrap().insert(c.id, d);
-        self.record_read(WINDOW * 2);
+        self.record_read(generation, WINDOW * 2);
         Some(d)
     }
 
-    fn full_digest(&self, c: &Candidate) -> Option<Digest> {
+    fn full_digest(&self, c: &Candidate, generation: u64) -> Option<Digest> {
         if let Some(d) = self.full.lock().unwrap().get(&c.id) {
             return Some(*d);
         }
         let d = hash_file(&self.path_of(c))?;
         self.full.lock().unwrap().insert(c.id, d);
-        self.record_read(c.size);
+        self.record_read(generation, c.size);
         Some(d)
     }
 
-    fn record_read(&self, bytes: u64) {
+    fn record_read(&self, generation: u64, bytes: u64) {
         let mut p = self.progress.lock().unwrap();
-        p.read += 1;
-        p.bytes_read += bytes;
+        // A superseded run must not pollute the counters of the one that
+        // replaced it.
+        if p.generation == generation {
+            p.read += 1;
+            p.bytes_read += bytes;
+        }
     }
 
     fn update<F: FnOnce(&mut DupeProgress)>(&self, generation: u64, f: F) {

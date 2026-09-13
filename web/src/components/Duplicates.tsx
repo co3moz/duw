@@ -121,7 +121,7 @@ export function Duplicates({
         <p className="empty">Stopped after {duration(progress.elapsed_ms)}.</p>
       )}
 
-      {groups.length > 0 && (
+      {matchesScope && groups.length > 0 && (
         <ul className="rows dupe-groups">
           {groups.map((g, i) => (
             <li key={`${g.size}-${g.files[0]?.id ?? i}`} className="dupe-group">
@@ -142,7 +142,7 @@ export function Duplicates({
         </ul>
       )}
 
-      {truncated && (
+      {matchesScope && truncated && (
         <p className="empty">
           Showing the {count(groups.length)} largest of {count(totalGroups)} groups.
         </p>

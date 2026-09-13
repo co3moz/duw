@@ -452,7 +452,11 @@ impl Tree {
     pub fn duplicate_candidates(&self, id: u32, min_size: u64) -> Vec<Candidate> {
         let mut out = Vec::new();
         if self.get(id).is_some() {
-            self.collect_candidates(id, min_size, &mut String::new(), &mut out);
+            // Seed the prefix with the scope's own path so paths stay relative
+            // to the scan root no matter which folder is being scanned. The
+            // duplicate hasher rebuilds absolute paths from them.
+            let mut prefix = self.rel_path(id);
+            self.collect_candidates(id, min_size, &mut prefix, &mut out);
         }
         out
     }
@@ -697,6 +701,29 @@ mod tests {
             found,
             vec!["local.bin".to_string(), "sub/deep.bin".to_string()]
         );
+    }
+
+    #[test]
+    fn duplicate_candidate_paths_are_root_relative_for_sub_scopes() {
+        let mut t = Tree::new("root".into(), 0, 0, 0);
+        let sub = t.add_children(ROOT, vec![entry("sub", Kind::Dir, 0)]);
+        let nested = t.add_children(
+            sub[0],
+            vec![
+                entry("nested", Kind::Dir, 0),
+                entry("a.bin", Kind::File, 5000),
+            ],
+        );
+        t.add_children(nested[0], vec![entry("deep.bin", Kind::File, 5000)]);
+
+        // Scanning "sub/nested" must still produce paths that can be resolved
+        // from the scan root, not just the scope's bare file name.
+        let found: Vec<String> = t
+            .duplicate_candidates(nested[0], 1)
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        assert_eq!(found, vec!["sub/nested/deep.bin".to_string()]);
     }
 
     #[test]

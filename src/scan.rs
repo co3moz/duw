@@ -264,7 +264,17 @@ impl Scanner {
             ids
         };
 
-        if !recurse || self.is_cancelled() {
+        if !recurse {
+            // These directories sit at the depth limit and will never be
+            // walked, so mark them read: otherwise the UI shows a permanent
+            // "scanning…" marker on them.
+            let mut t = self.tree.write().unwrap();
+            for id in &dir_ids {
+                t.mark_read(*id, false);
+            }
+            return;
+        }
+        if self.is_cancelled() {
             return;
         }
         debug_assert_eq!(dir_ids.len(), subdirs.len());

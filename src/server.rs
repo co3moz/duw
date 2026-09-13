@@ -17,7 +17,7 @@ use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::assets;
-use crate::dupes::{DupeGroup, DupeProgress, Dupes};
+use crate::dupes::{DupeGroup, DupeProgress, Dupes, Phase};
 use crate::fsext;
 use crate::scan::Scanner;
 use crate::tree::{Crumb, Entry, ExtStat, LargeFile, Rollup, Stats, SubtreeNode};
@@ -337,16 +337,23 @@ async fn duplicates(
         return (StatusCode::NOT_FOUND, "no such node").into_response();
     }
     let limit = q.limit.unwrap_or(200).clamp(1, 5000);
-    let mut groups = state.dupes.groups();
-    let total_groups = groups.len();
-    let truncated = total_groups > limit;
-    groups.truncate(limit);
+    let progress = state.dupes.progress();
+    // The results belong to whatever scope produced them. Asking for another
+    // folder must not surface the previous folder's groups.
+    let (groups, total_groups) = if progress.scope == id && progress.phase != Phase::Idle {
+        let mut all = state.dupes.groups();
+        let total = all.len();
+        all.truncate(limit);
+        (all, total)
+    } else {
+        (Vec::new(), 0)
+    };
 
     Json(DupesResponse {
-        progress: state.dupes.progress(),
+        progress,
         groups,
         total_groups,
-        truncated,
+        truncated: total_groups > limit,
     })
     .into_response()
 }
