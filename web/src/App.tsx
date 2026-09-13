@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, filterActive, type FilterSpec, type Metric, type SortKey } from './api'
+import { api, filterActive, type FilterSpec, type Kind, type Metric, type SortKey } from './api'
 import { bytes, count, duration, parseSize, AGE_STOPS } from './format'
 import { useElementSize } from './useElementSize'
 import { useDebounced, useLive, useResource, useThrottled } from './useLive'
@@ -234,6 +234,19 @@ export default function App() {
     setSelected((cur) => (cur === id ? null : cur))
   }, [])
 
+  // The rows the arrow keys can walk through, in display order.
+  const visible = useMemo<{ id: number; kind: Kind }[]>(() => {
+    if (tab === 'folders') {
+      return filtering
+        ? (search.data?.hits ?? []).map((h) => ({ id: h.id, kind: h.kind }))
+        : (node.data?.children ?? []).map((e) => ({ id: e.id, kind: e.kind }))
+    }
+    if (tab === 'largest') {
+      return (largest.data?.files ?? []).map((f) => ({ id: f.id, kind: 'file' as const }))
+    }
+    return []
+  }, [tab, filtering, search.data, node.data, largest.data])
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null
@@ -245,6 +258,30 @@ export default function App() {
         return
       }
       if (typing) return
+
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        if (!visible.length) return
+        e.preventDefault()
+        const idx = visible.findIndex((v) => v.id === selected)
+        const next =
+          e.key === 'ArrowDown'
+            ? idx < 0
+              ? 0
+              : Math.min(visible.length - 1, idx + 1)
+            : idx < 0
+              ? visible.length - 1
+              : Math.max(0, idx - 1)
+        setSelected(visible[next].id)
+        return
+      }
+      if (e.key === 'Enter') {
+        const row = visible.find((v) => v.id === selected)
+        if (row?.kind === 'dir') {
+          e.preventDefault()
+          open(row.id)
+        }
+        return
+      }
       if (e.key === 'Backspace' || e.key === 'Escape') {
         e.preventDefault()
         up()
@@ -252,7 +289,13 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [up, menu])
+  }, [up, menu, visible, selected, open])
+
+  // Keep the keyboard selection on screen when it moves past the fold.
+  useEffect(() => {
+    if (selected == null) return
+    document.querySelector(`[data-id="${selected}"]`)?.scrollIntoView({ block: 'nearest' })
+  }, [selected])
 
   if (error && !state) {
     return <div className="fatal">{error}</div>

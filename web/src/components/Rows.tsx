@@ -136,6 +136,7 @@ export function FolderRows({
         return (
           <li
             key={e.id}
+            data-id={e.id}
             className={'row' + (e.id === selected ? ' row-selected' : '')}
             onClick={() => onSelect(e.id)}
             onDoubleClick={() => e.kind === 'dir' && onOpen(e.id)}
@@ -276,7 +277,7 @@ export function LargestRows({
         const dot = name.lastIndexOf('.')
         const cat = categoryOf(dot > 0 ? name.slice(dot + 1) : null)
         return (
-          <li key={f.id} className="row">
+          <li key={f.id} data-id={f.id} className="row">
             <span className="row-icon" style={{ color: CATEGORY_COLOR[cat] }}>
               ▪
             </span>
@@ -324,7 +325,7 @@ export function SearchRows({
         const dir = slash >= 0 ? h.path.slice(0, slash) : ''
         const cat: Category = h.kind === 'dir' ? 'folder' : categoryOf(h.ext)
         return (
-          <li key={h.id} className="row" onDoubleClick={() => onOpen(h)}>
+          <li key={h.id} data-id={h.id} className="row" onDoubleClick={() => onOpen(h)}>
             <span className="row-icon" style={{ color: CATEGORY_COLOR[cat] }}>
               {h.kind === 'dir' ? '▣' : h.kind === 'link' ? '↗' : '▪'}
             </span>
