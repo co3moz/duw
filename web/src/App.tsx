@@ -10,6 +10,12 @@ import { Snapshots } from './components/Snapshots'
 
 type Tab = 'folders' | 'types' | 'largest' | 'duplicates' | 'snapshots'
 
+/** Folder encoded in the URL, so links and the back button work. */
+function nodeFromHash(): number {
+  const m = /^#\/node\/(\d+)$/.exec(window.location.hash)
+  return m ? Number(m[1]) : 0
+}
+
 const LIST_LIMIT = 500
 const MAP_DEPTH = 3
 const MAP_PER_LEVEL = 60
@@ -21,7 +27,7 @@ const MIN_MAP = 320
 
 export default function App() {
   const { state, progress, error } = useLive()
-  const [nodeId, setNodeId] = useState(0)
+  const [nodeId, setNodeId] = useState(nodeFromHash)
   const [metric, setMetric] = useState<Metric>('size')
   const [tab, setTab] = useState<Tab>('folders')
   const [selected, setSelected] = useState<number | null>(null)
@@ -141,6 +147,39 @@ export default function App() {
     const crumbs = node.data?.breadcrumb
     if (crumbs && crumbs.length > 1) open(crumbs[crumbs.length - 2].id)
   }, [node.data, open])
+
+  // Keep the URL in step with the folder in view. pushState (rather than
+  // assigning location.hash) does not fire hashchange, so this cannot loop.
+  const initialHash = useRef(true)
+  useEffect(() => {
+    const hash = `#/node/${nodeId}`
+    const replace = initialHash.current
+    initialHash.current = false
+    if (window.location.hash !== hash) {
+      if (replace) window.history.replaceState(null, '', hash)
+      else window.history.pushState(null, '', hash)
+    }
+  }, [nodeId])
+
+  useEffect(() => {
+    const sync = () => {
+      const id = nodeFromHash()
+      setNodeId((cur) => (cur === id ? cur : id))
+      setSelected(null)
+    }
+    window.addEventListener('popstate', sync)
+    window.addEventListener('hashchange', sync)
+    return () => {
+      window.removeEventListener('popstate', sync)
+      window.removeEventListener('hashchange', sync)
+    }
+  }, [])
+
+  // A link to a node that is not part of this scan falls back to the root
+  // instead of leaving the view stuck.
+  useEffect(() => {
+    if (node.error?.startsWith('404') && nodeId !== 0) setNodeId(0)
+  }, [node.error, nodeId])
 
   const onDividerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault()
