@@ -13,6 +13,30 @@ import {
 
 const value = (o: { size: number; alloc: number }, m: Metric) => (m === 'alloc' ? o.alloc : o.size)
 
+/** Opens the per-entry action menu at the pointer. */
+export type MenuHandler = (id: number, name: string, e: React.MouseEvent) => void
+
+function MenuButton({ id, name, onMenu }: { id: number; name: string; onMenu: MenuHandler }) {
+  return (
+    <button
+      className="row-menu"
+      title="Actions"
+      aria-label={`Actions for ${name}`}
+      onClick={(ev) => {
+        ev.stopPropagation()
+        onMenu(id, name, ev)
+      }}
+      onContextMenu={(ev) => {
+        ev.preventDefault()
+        ev.stopPropagation()
+        onMenu(id, name, ev)
+      }}
+    >
+      ⋯
+    </button>
+  )
+}
+
 function Bar({ pct, color }: { pct: number; color: string }) {
   return (
     <div className="bar" title={`${pct.toFixed(1)}%`}>
@@ -30,6 +54,7 @@ export function FolderRows({
   onSelect,
   onOpen,
   onUp,
+  onMenu,
 }: {
   entries: Entry[]
   other: Rollup
@@ -40,6 +65,7 @@ export function FolderRows({
   onOpen: (id: number) => void
   /// Absent at the scan root, where there is nowhere to go up to.
   onUp?: () => void
+  onMenu?: MenuHandler
 }) {
   return (
     <ul className="rows">
@@ -91,6 +117,7 @@ export function FolderRows({
             <Bar pct={percent(v, total)} color={CATEGORY_COLOR[cat]} />
             <span className="row-pct">{percent(v, total).toFixed(1)}%</span>
             <span className="row-size">{bytes(v)}</span>
+            {onMenu && <MenuButton id={e.id} name={e.name} onMenu={onMenu} />}
           </li>
         )
       })}
@@ -180,10 +207,12 @@ export function LargestRows({
   files,
   metric,
   total,
+  onMenu,
 }: {
   files: LargeFile[]
   metric: Metric
   total: number
+  onMenu?: MenuHandler
 }) {
   if (!files.length) return <p className="empty">No files scanned here yet.</p>
   return (
@@ -210,6 +239,7 @@ export function LargestRows({
             <Bar pct={percent(v, total)} color={CATEGORY_COLOR[cat]} />
             <span className="row-pct">{percent(v, total).toFixed(1)}%</span>
             <span className="row-size">{bytes(v)}</span>
+            {onMenu && <MenuButton id={f.id} name={name} onMenu={onMenu} />}
           </li>
         )
       })}

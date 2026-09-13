@@ -1,5 +1,6 @@
 import type { DupeGroup, DupeProgress } from '../api'
 import { bytes, count, duration, percent } from '../format'
+import type { MenuHandler } from './Rows'
 
 /** Thresholds offered in the UI; the CLI accepts any value. */
 const THRESHOLDS = [
@@ -32,6 +33,7 @@ export function Duplicates({
   onMinSize,
   onScan,
   onCancel,
+  onMenu,
 }: {
   progress: DupeProgress
   groups: DupeGroup[]
@@ -44,6 +46,7 @@ export function Duplicates({
   onMinSize: (value: number) => void
   onScan: () => void
   onCancel: () => void
+  onMenu?: MenuHandler
 }) {
   const running = RUNNING.includes(progress.phase)
   const done = progress.phase === 'done' && matchesScope
@@ -133,7 +136,17 @@ export function Duplicates({
               <ul className="dupe-files">
                 {g.files.map((f) => (
                   <li key={f.id} title={f.path}>
-                    {f.path}
+                    <span className="dupe-path">{f.path}</span>
+                    {onMenu && (
+                      <button
+                        className="row-menu dupe-menu"
+                        title="Actions"
+                        aria-label={`Actions for ${f.path}`}
+                        onClick={(ev) => onMenu(f.id, f.path, ev)}
+                      >
+                        ⋯
+                      </button>
+                    )}
                   </li>
                 ))}
               </ul>

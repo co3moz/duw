@@ -3,6 +3,7 @@ import { hierarchy, treemap, treemapSquarify, type HierarchyRectangularNode } fr
 import type { Metric, SubtreeNode } from '../api'
 import { CATEGORY_COLOR, bytes, categoryOf, percent } from '../format'
 import { useElementSize } from '../useElementSize'
+import type { MenuHandler } from './Rows'
 
 /** Leaf-only value carrier; `rest` stands for the entries the server trimmed. */
 interface Cell {
@@ -22,11 +23,13 @@ export function Treemap({
   metric,
   onOpen,
   selected,
+  onMenu,
 }: {
   root: SubtreeNode
   metric: Metric
   onOpen: (id: number) => void
   selected: number | null
+  onMenu?: MenuHandler
 }) {
   const [box, ref] = useElementSize<HTMLDivElement>()
   const [hover, setHover] = useState<HierarchyRectangularNode<Cell> | null>(null)
@@ -75,6 +78,12 @@ export function Treemap({
                 onMouseLeave={() => setHover((cur) => (cur === d ? null : cur))}
                 onClick={() => {
                   if (d.data.kind === 'dir') onOpen(d.data.id)
+                }}
+                onContextMenu={(ev) => {
+                  if (onMenu && d.data.kind !== 'rest' && d.data.id >= 0) {
+                    ev.preventDefault()
+                    onMenu(d.data.id, d.data.name, ev)
+                  }
                 }}
               >
                 <rect width={w} height={h} rx={2} fill={fill} />

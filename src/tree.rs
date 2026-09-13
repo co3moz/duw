@@ -41,6 +41,8 @@ pub struct Node {
     pub read: bool,
     /// Reading this entry failed.
     pub err: bool,
+    /// Moved to the trash from the UI; its subtree is no longer reachable.
+    pub removed: bool,
     /// Filtered out as cloud-backed: its bytes live in the cloud, not here.
     pub cloud: bool,
     pub children: Vec<u32>,
@@ -105,6 +107,7 @@ impl Tree {
             depth: 0,
             read: false,
             err: false,
+            removed: false,
             cloud: false,
             children: Vec::new(),
         };
@@ -179,6 +182,7 @@ impl Tree {
                 // unread would leave a permanent "scanning…" marker on it.
                 read: e.cloud,
                 err: e.err,
+                removed: false,
                 cloud: e.cloud,
                 children: Vec::new(),
             });
@@ -213,6 +217,65 @@ impl Tree {
         self.stats.errors += 1;
         if self.errors.len() < MAX_KEPT_ERRORS {
             self.errors.push(ScanError { path, message });
+        }
+    }
+
+    /// Detaches `id` after it was moved to the trash, subtracting its subtree
+    /// from every ancestor so the totals stay coherent. Returns false for the
+    /// root, an already removed node, or a node whose ancestor is gone.
+    pub fn remove(&mut self, id: u32) -> bool {
+        if id == ROOT || self.nodes[id as usize].removed {
+            return false;
+        }
+        let parent = self.nodes[id as usize].parent;
+        let mut cur = parent;
+        loop {
+            if self.nodes[cur as usize].removed {
+                return false;
+            }
+            if cur == ROOT {
+                break;
+            }
+            cur = self.nodes[cur as usize].parent;
+        }
+
+        if let Some(pos) = self.nodes[parent as usize]
+            .children
+            .iter()
+            .position(|&c| c == id)
+        {
+            self.nodes[parent as usize].children.remove(pos);
+        }
+
+        let n = &self.nodes[id as usize];
+        let (size, alloc, files, dirs) = if n.kind == Kind::Dir {
+            (n.total_size, n.total_alloc, n.files, n.dirs + 1)
+        } else {
+            (n.total_size, n.total_alloc, 1, 0)
+        };
+        self.nodes[id as usize].removed = true;
+        self.subtract(parent, size, alloc, files, dirs);
+
+        self.stats.files = self.stats.files.saturating_sub(files as u64);
+        self.stats.dirs = self.stats.dirs.saturating_sub(dirs as u64);
+        self.stats.size = self.stats.size.saturating_sub(size);
+        self.stats.alloc = self.stats.alloc.saturating_sub(alloc);
+        self.version += 1;
+        true
+    }
+
+    fn subtract(&mut self, from: u32, size: u64, alloc: u64, files: u32, dirs: u32) {
+        let mut id = from;
+        loop {
+            let n = &mut self.nodes[id as usize];
+            n.total_size = n.total_size.saturating_sub(size);
+            n.total_alloc = n.total_alloc.saturating_sub(alloc);
+            n.files = n.files.saturating_sub(files);
+            n.dirs = n.dirs.saturating_sub(dirs);
+            if id == ROOT {
+                break;
+            }
+            id = n.parent;
         }
     }
 
@@ -724,6 +787,46 @@ mod tests {
             .map(|c| c.path)
             .collect();
         assert_eq!(found, vec!["sub/nested/deep.bin".to_string()]);
+    }
+
+    #[test]
+    fn removing_a_subtree_subtracts_from_ancestors() {
+        let mut t = Tree::new("root".into(), 0, 0, 0);
+        let dirs = t.add_children(
+            ROOT,
+            vec![entry("d", Kind::Dir, 0), entry("keep.bin", Kind::File, 100)],
+        );
+        let d = dirs[0];
+        let inner = t.add_children(
+            d,
+            vec![entry("a.bin", Kind::File, 900), entry("sub", Kind::Dir, 0)],
+        );
+        let sub = inner[0];
+        t.add_children(sub, vec![entry("deep.bin", Kind::File, 5000)]);
+
+        assert_eq!(t.nodes[ROOT as usize].total_size, 6000);
+        assert_eq!(t.nodes[ROOT as usize].files, 3);
+        assert_eq!(t.nodes[ROOT as usize].dirs, 2);
+        assert_eq!(t.stats.size, 6000);
+        assert_eq!(t.stats.files, 3);
+        assert_eq!(t.stats.dirs, 2);
+
+        assert!(t.remove(sub));
+        assert_eq!(t.nodes[ROOT as usize].total_size, 1000);
+        assert_eq!(t.nodes[ROOT as usize].files, 2);
+        assert_eq!(t.nodes[ROOT as usize].dirs, 1);
+        assert_eq!(t.nodes[d as usize].total_size, 900);
+        assert_eq!(t.stats.size, 1000);
+        assert_eq!(t.stats.files, 2);
+        assert_eq!(t.stats.dirs, 1);
+
+        // Removing the same entry twice, the root, or a descendant of a
+        // removed directory must all be refused.
+        assert!(!t.remove(sub));
+        assert!(!t.remove(ROOT));
+        let deep = t.nodes[sub as usize].children[0];
+        assert!(!t.remove(deep));
+        assert_eq!(t.stats.size, 1000);
     }
 
     #[test]

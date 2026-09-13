@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -16,11 +16,14 @@ use tokio::sync::watch;
 use tokio_stream::wrappers::IntervalStream;
 use tokio_stream::{Stream, StreamExt};
 
+use crate::actions;
 use crate::assets;
 use crate::dupes::{DupeGroup, DupeProgress, Dupes, Phase};
 use crate::fsext;
 use crate::scan::Scanner;
-use crate::tree::{Crumb, Entry, ExtStat, LargeFile, Rollup, Stats, SubtreeNode};
+use crate::tree::{
+    Crumb, Entry, ExtStat, LargeFile, Rollup, Stats, SubtreeNode, ROOT,
+};
 
 const DEFAULT_LIMIT: usize = 400;
 const MAX_LIMIT: usize = 5000;
@@ -50,6 +53,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/largest/{id}", get(largest))
         .route("/api/errors", get(errors))
         .route("/api/cancel", post(cancel))
+        .route("/api/abs/{id}", get(abs_path))
+        .route("/api/reveal/{id}", post(reveal))
+        .route("/api/trash/{id}", post(trash_node))
         .route(
             "/api/duplicates/{id}",
             get(duplicates).post(start_duplicates),
@@ -309,6 +315,103 @@ async fn errors(State(state): State<AppState>) -> impl IntoResponse {
 async fn cancel(State(state): State<AppState>) -> impl IntoResponse {
     state.scanner.cancel();
     StatusCode::ACCEPTED
+}
+
+/// Rejects cross-site requests so an arbitrary web page cannot drive file
+/// actions on a localhost server. Browsers send `Origin` on POST requests;
+/// command-line clients such as curl do not, and are allowed through.
+fn cross_site(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
+        return true;
+    };
+    match origin.split_once("://") {
+        Some((_, rest)) => rest != host,
+        // `Origin: null` and other opaque values are not trustworthy.
+        None => true,
+    }
+}
+
+/// Absolute path of a node, built from the scan root and the tree-relative
+/// path. It never touches the filesystem, so it also works for entries that
+/// have been removed from the tree.
+fn node_path(state: &AppState, id: u32) -> Option<std::path::PathBuf> {
+    let t = state.scanner.tree.read().unwrap();
+    t.get(id)?;
+    let mut path = std::path::PathBuf::from(&state.root);
+    for part in t.rel_path(id).split('/').filter(|p| !p.is_empty()) {
+        path.push(part);
+    }
+    Some(path)
+}
+
+#[derive(Serialize)]
+struct PathResponse {
+    path: String,
+}
+
+async fn abs_path(State(state): State<AppState>, Path(id): Path<u32>) -> impl IntoResponse {
+    match node_path(&state, id) {
+        Some(path) => Json(PathResponse {
+            path: path.display().to_string(),
+        })
+        .into_response(),
+        None => (StatusCode::NOT_FOUND, "no such node").into_response(),
+    }
+}
+
+async fn reveal(
+    State(state): State<AppState>,
+    Path(id): Path<u32>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if cross_site(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-site request rejected").into_response();
+    }
+    let Some(path) = node_path(&state, id) else {
+        return (StatusCode::NOT_FOUND, "no such node").into_response();
+    };
+    match actions::reveal(&path) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not open the file manager: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn trash_node(
+    State(state): State<AppState>,
+    Path(id): Path<u32>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if cross_site(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-site request rejected").into_response();
+    }
+    if id == ROOT {
+        return (StatusCode::BAD_REQUEST, "cannot move the scan root").into_response();
+    }
+    if !state.scanner.is_done() {
+        return (StatusCode::CONFLICT, "a scan is still running").into_response();
+    }
+    let Some(path) = node_path(&state, id) else {
+        return (StatusCode::NOT_FOUND, "no such node").into_response();
+    };
+    if let Err(e) = actions::to_trash(&path) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not move to trash: {e}"),
+        )
+            .into_response();
+    }
+    // The bytes are gone either way; a failed detach would only leave the tree
+    // stale until the next scan.
+    state.scanner.tree.write().unwrap().remove(id);
+    state.dupes.forget(id);
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Deserialize)]

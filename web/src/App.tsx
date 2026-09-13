@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, type Metric } from './api'
 import { bytes, count, duration } from './format'
+import { useElementSize } from './useElementSize'
 import { useLive, useResource, useThrottled } from './useLive'
 import { Treemap } from './components/Treemap'
 import { FolderRows, LargestRows, TypeRows } from './components/Rows'
@@ -13,6 +14,9 @@ const MAP_DEPTH = 3
 const MAP_PER_LEVEL = 60
 /** Refetch at most this often while a scan is streaming in. */
 const REFRESH_MS = 600
+/** Bounds for the draggable list/map divider, in pixels. */
+const MIN_LIST = 280
+const MIN_MAP = 320
 
 export default function App() {
   const { state, progress, error } = useLive()
@@ -20,6 +24,26 @@ export default function App() {
   const [metric, setMetric] = useState<Metric>('size')
   const [tab, setTab] = useState<Tab>('folders')
   const [selected, setSelected] = useState<number | null>(null)
+
+  // Width of the list panel in pixels. `null` keeps the stylesheet default
+  // until the divider is dragged; `useElementSize` lets us clamp to the
+  // available space when the window is resized.
+  const [splitBox, splitRef] = useElementSize<HTMLElement>()
+  const [listWidth, setListWidth] = useState<number | null>(null)
+  const dragging = useRef(false)
+  const [menu, setMenu] = useState<{ id: number; name: string; x: number; y: number } | null>(null)
+
+  const dragTo = useCallback((clientX: number, parent: HTMLElement) => {
+    const rect = parent.getBoundingClientRect()
+    const max = Math.max(MIN_LIST, rect.width - MIN_MAP)
+    setListWidth(Math.min(max, Math.max(MIN_LIST, clientX - rect.left)))
+  }, [])
+
+  useEffect(() => {
+    if (listWidth == null || !splitBox.width) return
+    const max = Math.max(MIN_LIST, splitBox.width - MIN_MAP)
+    if (listWidth > max) setListWidth(max)
+  }, [splitBox.width, listWidth])
 
   const version = useThrottled(progress?.version ?? 0, REFRESH_MS)
 
@@ -71,8 +95,60 @@ export default function App() {
     if (crumbs && crumbs.length > 1) open(crumbs[crumbs.length - 2].id)
   }, [node.data, open])
 
+  const onDividerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    dragging.current = true
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+  const onDividerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragging.current) return
+    const parent = e.currentTarget.parentElement
+    if (parent) dragTo(e.clientX, parent)
+  }
+  const onDividerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    dragging.current = false
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    }
+  }
+
+  const openMenu = useCallback((id: number, name: string, e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setMenu({ id, name, x: e.clientX, y: e.clientY })
+  }, [])
+
+  const revealEntry = useCallback(async (id: number) => {
+    const res = await api.reveal(id)
+    if (!res.ok) window.alert(`could not open the file manager: ${await res.text()}`)
+  }, [])
+
+  const copyPath = useCallback(async (id: number) => {
+    try {
+      const { path } = await api.abs(id)
+      await navigator.clipboard.writeText(path)
+    } catch (e) {
+      window.alert(String(e))
+    }
+  }, [])
+
+  const moveToTrash = useCallback(async (id: number, name: string) => {
+    if (!window.confirm(`Move "${name}" to the trash?`)) return
+    const res = await api.trash(id)
+    if (!res.ok) {
+      window.alert(await res.text())
+      return
+    }
+    setSelected((cur) => (cur === id ? null : cur))
+  }, [])
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && menu) {
+        e.preventDefault()
+        setMenu(null)
+        return
+      }
       if (e.key === 'Backspace' || e.key === 'Escape') {
         e.preventDefault()
         up()
@@ -80,7 +156,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [up])
+  }, [up, menu])
 
   if (error && !state) {
     return <div className="fatal">{error}</div>
@@ -93,6 +169,10 @@ export default function App() {
   const total = metric === 'alloc' ? view.alloc : view.size
   const scanning = progress?.scanning ?? false
   const stats = progress?.stats
+  const splitStyle =
+    listWidth != null
+      ? ({ '--list-w': `${Math.round(listWidth)}px` } as React.CSSProperties)
+      : undefined
 
   return (
     <div className="app">
@@ -164,7 +244,7 @@ export default function App() {
         {scanning && <div className="scanline" />}
       </header>
 
-      <main className="split">
+      <main className="split" ref={splitRef} style={splitStyle}>
         <section className="panel panel-list">
           <div className="tabs">
             <button className={tab === 'folders' ? 'on' : ''} onClick={() => setTab('folders')}>
@@ -194,6 +274,7 @@ export default function App() {
                 onSelect={setSelected}
                 onOpen={open}
                 onUp={view.breadcrumb.length > 1 ? up : undefined}
+                onMenu={openMenu}
               />
             )}
             {tab === 'types' &&
@@ -204,7 +285,12 @@ export default function App() {
               ))}
             {tab === 'largest' &&
               (largest.data ? (
-                <LargestRows files={largest.data.files} metric={metric} total={total} />
+                <LargestRows
+                  files={largest.data.files}
+                  metric={metric}
+                  total={total}
+                  onMenu={openMenu}
+                />
               ) : (
                 <p className="empty">aggregating…</p>
               ))}
@@ -220,14 +306,34 @@ export default function App() {
                 onMinSize={runDupes}
                 onScan={() => runDupes(effectiveMin)}
                 onCancel={() => api.cancelDuplicates()}
+                onMenu={openMenu}
               />
             )}
           </div>
         </section>
 
+        <div
+          className="divider"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize the list and map panels"
+          title="Drag to resize, double-click to reset"
+          onPointerDown={onDividerDown}
+          onPointerMove={onDividerMove}
+          onPointerUp={onDividerUp}
+          onPointerCancel={onDividerUp}
+          onDoubleClick={() => setListWidth(null)}
+        />
+
         <section className="panel panel-map">
           {map.data ? (
-            <Treemap root={map.data.root} metric={metric} onOpen={open} selected={selected} />
+            <Treemap
+              root={map.data.root}
+              metric={metric}
+              onOpen={open}
+              selected={selected}
+              onMenu={openMenu}
+            />
           ) : (
             <div className="empty">building map…</div>
           )}
@@ -243,6 +349,56 @@ export default function App() {
         )}
         {!state.platform.hardlink_dedup && <span className="note">hard links counted once per link</span>}
       </footer>
+
+      {menu && (
+        <>
+          <div
+            className="menu-backdrop"
+            onClick={() => setMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              setMenu(null)
+            }}
+          />
+          <div
+            className="menu"
+            role="menu"
+            style={{
+              left: Math.min(menu.x, window.innerWidth - 200),
+              top: Math.min(menu.y, window.innerHeight - 110),
+            }}
+          >
+            <button
+              role="menuitem"
+              onClick={() => {
+                setMenu(null)
+                void revealEntry(menu.id)
+              }}
+            >
+              Show in file manager
+            </button>
+            <button
+              role="menuitem"
+              onClick={() => {
+                setMenu(null)
+                void copyPath(menu.id)
+              }}
+            >
+              Copy path
+            </button>
+            <button
+              role="menuitem"
+              className="menu-danger"
+              onClick={() => {
+                setMenu(null)
+                void moveToTrash(menu.id, menu.name)
+              }}
+            >
+              Move to trash
+            </button>
+          </div>
+        </>
+      )}
     </div>
   )
 }

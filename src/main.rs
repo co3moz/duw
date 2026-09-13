@@ -1,3 +1,4 @@
+mod actions;
 mod assets;
 mod cli;
 mod dupes;

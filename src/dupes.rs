@@ -165,6 +165,41 @@ impl Dupes {
         }
     }
 
+    /// Drops a trashed file from the cached digests and from any group it was
+    /// part of, so the UI stops offering a file that is already gone.
+    pub fn forget(&self, id: u32) {
+        self.window.lock().unwrap().remove(&id);
+        self.full.lock().unwrap().remove(&id);
+
+        let mut groups = self.groups.write().unwrap();
+        groups.retain_mut(|g| {
+            g.files.retain(|f| f.id != id);
+            g.wasted = g.size * g.files.len().saturating_sub(1) as u64;
+            g.files.len() > 1
+        });
+        let total_wasted: u64 = groups.iter().map(|g| g.wasted).sum();
+        let group_count = groups.len() as u64;
+        drop(groups);
+
+        let mut p = self.progress.lock().unwrap();
+        p.groups = group_count;
+        p.wasted = total_wasted;
+        match p.phase {
+            // The inputs changed under the running scan, so it cannot finish
+            // coherently. Marking it cancelled also stops the worker, whose
+            // generation no longer matches.
+            Phase::Grouping | Phase::Windowing | Phase::Hashing => {
+                p.phase = Phase::Cancelled;
+                self.generation.fetch_add(1, Ordering::SeqCst);
+            }
+            // Force the UI to refetch the now smaller result list.
+            Phase::Done | Phase::Cancelled => {
+                self.generation.fetch_add(1, Ordering::SeqCst);
+            }
+            Phase::Idle => {}
+        }
+    }
+
     fn stale(&self, generation: u64) -> bool {
         self.generation.load(Ordering::SeqCst) != generation
     }

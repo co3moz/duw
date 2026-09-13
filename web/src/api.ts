@@ -169,6 +169,13 @@ export const api = {
 
   cancel: () => fetch('/api/cancel', { method: 'POST' }),
 
+  abs: (id: number, signal?: AbortSignal) =>
+    get<{ path: string }>(`/api/abs/${id}`, signal),
+
+  reveal: (id: number) => fetch(`/api/reveal/${id}`, { method: 'POST' }),
+
+  trash: (id: number) => fetch(`/api/trash/${id}`, { method: 'POST' }),
+
   duplicates: (id: number, limit: number, signal?: AbortSignal) =>
     get<{
       progress: DupeProgress
