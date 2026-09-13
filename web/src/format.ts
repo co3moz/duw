@@ -29,6 +29,20 @@ export function percent(part: number, whole: number): number {
   return whole > 0 ? (part / whole) * 100 : 0
 }
 
+/** Parses "512K", "10M", "1G" or a plain byte count; null when invalid. */
+export function parseSize(text: string): number | null {
+  const m = /^(\d+(?:\.\d+)?)\s*([kmgt]?)b?$/i.exec(text.trim())
+  if (!m) return null
+  const scale: Record<string, number> = {
+    '': 1,
+    k: 1024,
+    m: 1024 ** 2,
+    g: 1024 ** 3,
+    t: 1024 ** 4,
+  }
+  return Math.round(parseFloat(m[1]) * (scale[m[2].toLowerCase()] ?? 1))
+}
+
 export function mtime(unixSeconds: number): string {
   if (!unixSeconds) return '-'
   return new Date(unixSeconds * 1000).toLocaleDateString()

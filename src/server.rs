@@ -22,7 +22,7 @@ use crate::dupes::{DupeGroup, DupeProgress, Dupes, Phase};
 use crate::fsext;
 use crate::scan::Scanner;
 use crate::tree::{
-    Crumb, Entry, ExtStat, LargeFile, Rollup, Stats, SubtreeNode, ROOT,
+    Crumb, Entry, ExtStat, LargeFile, Rollup, SearchFilter, SearchHit, Stats, SubtreeNode, ROOT,
 };
 
 const DEFAULT_LIMIT: usize = 400;
@@ -51,6 +51,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/tree/{id}", get(subtree))
         .route("/api/types/{id}", get(types))
         .route("/api/largest/{id}", get(largest))
+        .route("/api/search/{id}", get(search))
         .route("/api/errors", get(errors))
         .route("/api/cancel", post(cancel))
         .route("/api/abs/{id}", get(abs_path))
@@ -310,6 +311,73 @@ async fn largest(
 async fn errors(State(state): State<AppState>) -> impl IntoResponse {
     let t = state.scanner.tree.read().unwrap();
     Json(t.errors.clone())
+}
+
+#[derive(Deserialize)]
+struct SearchParams {
+    q: Option<String>,
+    /// Comma-separated extensions, with or without a leading dot.
+    ext: Option<String>,
+    min: Option<u64>,
+    max: Option<u64>,
+    /// Match entries at least this many days old.
+    age: Option<u64>,
+    #[serde(default)]
+    metric: Metric,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct SearchResponse {
+    hits: Vec<SearchHit>,
+    version: u64,
+    truncated: bool,
+}
+
+/// Entries matching a filter anywhere under `id`. The list panel uses this
+/// while a filter is active, so a search reaches the whole subtree rather than
+/// just the folder in view.
+async fn search(
+    State(state): State<AppState>,
+    Path(id): Path<u32>,
+    Query(p): Query<SearchParams>,
+) -> impl IntoResponse {
+    let t = state.scanner.tree.read().unwrap();
+    if t.get(id).is_none() {
+        return (StatusCode::NOT_FOUND, "no such node").into_response();
+    }
+
+    let query = p.q.unwrap_or_default().to_ascii_lowercase();
+    let exts: Vec<String> = p
+        .ext
+        .unwrap_or_default()
+        .split(',')
+        .map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let filter = SearchFilter {
+        query: &query,
+        exts: &exts,
+        min: p.min.unwrap_or(0),
+        max: p.max.unwrap_or(u64::MAX),
+        max_mtime: p.age.map(|days| now - days as i64 * 86_400),
+    };
+
+    let limit = p.limit.unwrap_or(500).clamp(1, MAX_LIMIT);
+    let mut hits = t.search(id, &filter, p.metric.by_alloc(), limit + 1, 20_000);
+    let truncated = hits.len() > limit;
+    hits.truncate(limit);
+
+    Json(SearchResponse {
+        hits,
+        version: t.version,
+        truncated,
+    })
+    .into_response()
 }
 
 async fn cancel(State(state): State<AppState>) -> impl IntoResponse {

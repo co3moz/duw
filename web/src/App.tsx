@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, type Metric } from './api'
-import { bytes, count, duration } from './format'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { api, filterActive, type FilterSpec, type Metric } from './api'
+import { bytes, count, duration, parseSize } from './format'
 import { useElementSize } from './useElementSize'
-import { useLive, useResource, useThrottled } from './useLive'
+import { useDebounced, useLive, useResource, useThrottled } from './useLive'
 import { Treemap } from './components/Treemap'
-import { FolderRows, LargestRows, TypeRows } from './components/Rows'
+import { FolderRows, LargestRows, SearchRows, TypeRows } from './components/Rows'
 import { Duplicates } from './components/Duplicates'
 
 type Tab = 'folders' | 'types' | 'largest' | 'duplicates'
@@ -32,6 +32,7 @@ export default function App() {
   const [listWidth, setListWidth] = useState<number | null>(null)
   const dragging = useRef(false)
   const [menu, setMenu] = useState<{ id: number; name: string; x: number; y: number } | null>(null)
+  const [filters, setFilters] = useState({ q: '', ext: '', min: '', max: '', age: '' })
 
   const dragTo = useCallback((clientX: number, parent: HTMLElement) => {
     const rect = parent.getBoundingClientRect()
@@ -47,6 +48,32 @@ export default function App() {
 
   const version = useThrottled(progress?.version ?? 0, REFRESH_MS)
 
+  const dq = useDebounced(filters.q, 250)
+  const dext = useDebounced(filters.ext, 250)
+  const dmin = useDebounced(filters.min, 250)
+  const dmax = useDebounced(filters.max, 250)
+  const dage = useDebounced(filters.age, 250)
+  const minBytes = dmin.trim() ? parseSize(dmin) : null
+  const maxBytes = dmax.trim() ? parseSize(dmax) : null
+  const ageDays = dage.trim() ? Number.parseInt(dage, 10) : null
+  const filter = useMemo<FilterSpec>(
+    () => ({
+      q: dq.trim().toLowerCase(),
+      exts: dext
+        .split(',')
+        .map((e) => e.trim().replace(/^\./, '').toLowerCase())
+        .filter(Boolean),
+      min: minBytes ?? 0,
+      max: maxBytes ?? Number.MAX_SAFE_INTEGER,
+      maxMtime:
+        ageDays != null && Number.isFinite(ageDays)
+          ? Math.floor(Date.now() / 1000) - ageDays * 86_400
+          : 0,
+    }),
+    [dq, dext, minBytes, maxBytes, ageDays],
+  )
+  const filtering = filterActive(filter)
+
   const node = useResource(
     (s) => api.node(nodeId, metric, LIST_LIMIT, s),
     [nodeId, metric, version],
@@ -54,6 +81,25 @@ export default function App() {
   const map = useResource(
     (s) => api.tree(nodeId, metric, MAP_DEPTH, MAP_PER_LEVEL, s),
     [nodeId, metric, version],
+  )
+  const search = useResource(
+    (s) =>
+      filtering
+        ? api.search(
+            nodeId,
+            {
+              q: filter.q,
+              ext: filter.exts.join(','),
+              min: filter.min > 0 ? filter.min : undefined,
+              max: filter.max < Number.MAX_SAFE_INTEGER ? filter.max : undefined,
+              age: ageDays != null && Number.isFinite(ageDays) ? ageDays : undefined,
+              metric,
+              limit: LIST_LIMIT,
+            },
+            s,
+          )
+        : Promise.resolve(null),
+    [nodeId, metric, version, filtering, filter, ageDays],
   )
   const types = useResource(
     (s) => (tab === 'types' ? api.types(nodeId, s) : Promise.resolve(null)),
@@ -144,11 +190,15 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null
+      const typing =
+        !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
       if (e.key === 'Escape' && menu) {
         e.preventDefault()
         setMenu(null)
         return
       }
+      if (typing) return
       if (e.key === 'Backspace' || e.key === 'Escape') {
         e.preventDefault()
         up()
@@ -246,6 +296,51 @@ export default function App() {
 
       <main className="split" ref={splitRef} style={splitStyle}>
         <section className="panel panel-list">
+          <div className="filters">
+            <input
+              className="filter-q"
+              placeholder="search name…"
+              value={filters.q}
+              onChange={(e) => setFilters((f) => ({ ...f, q: e.target.value }))}
+            />
+            <input
+              className="filter-ext"
+              placeholder="ext"
+              title="Comma-separated extensions, e.g. png,jpg"
+              value={filters.ext}
+              onChange={(e) => setFilters((f) => ({ ...f, ext: e.target.value }))}
+            />
+            <input
+              className="filter-min"
+              placeholder="min"
+              title="Smallest size, e.g. 10M"
+              value={filters.min}
+              onChange={(e) => setFilters((f) => ({ ...f, min: e.target.value }))}
+            />
+            <input
+              className="filter-max"
+              placeholder="max"
+              title="Largest size, e.g. 1G"
+              value={filters.max}
+              onChange={(e) => setFilters((f) => ({ ...f, max: e.target.value }))}
+            />
+            <input
+              className="filter-age"
+              placeholder="older (d)"
+              title="Modified at least this many days ago"
+              value={filters.age}
+              onChange={(e) => setFilters((f) => ({ ...f, age: e.target.value }))}
+            />
+            {filtering && (
+              <button
+                className="filter-clear"
+                title="Clear the filter"
+                onClick={() => setFilters({ q: '', ext: '', min: '', max: '', age: '' })}
+              >
+                clear
+              </button>
+            )}
+          </div>
           <div className="tabs">
             <button className={tab === 'folders' ? 'on' : ''} onClick={() => setTab('folders')}>
               folders
@@ -264,19 +359,39 @@ export default function App() {
             </button>
           </div>
           <div className="panel-body">
-            {tab === 'folders' && (
-              <FolderRows
-                entries={view.children}
-                other={view.other}
-                total={total}
-                metric={metric}
-                selected={selected}
-                onSelect={setSelected}
-                onOpen={open}
-                onUp={view.breadcrumb.length > 1 ? up : undefined}
-                onMenu={openMenu}
-              />
-            )}
+            {tab === 'folders' &&
+              (filtering ? (
+                search.data ? (
+                  <>
+                    <div className="filter-note">
+                      {count(search.data.hits.length)} match
+                      {search.data.hits.length === 1 ? '' : 'es'}
+                      {search.data.truncated ? ' (showing the biggest)' : ''}
+                    </div>
+                    <SearchRows
+                      hits={search.data.hits}
+                      metric={metric}
+                      total={total}
+                      onOpen={(hit) => open(hit.kind === 'dir' ? hit.id : hit.parent)}
+                      onMenu={openMenu}
+                    />
+                  </>
+                ) : (
+                  <p className="empty">searching…</p>
+                )
+              ) : (
+                <FolderRows
+                  entries={view.children}
+                  other={view.other}
+                  total={total}
+                  metric={metric}
+                  selected={selected}
+                  onSelect={setSelected}
+                  onOpen={open}
+                  onUp={view.breadcrumb.length > 1 ? up : undefined}
+                  onMenu={openMenu}
+                />
+              ))}
             {tab === 'types' &&
               (types.data ? (
                 <TypeRows types={types.data.types} metric={metric} total={total} />
@@ -333,6 +448,7 @@ export default function App() {
               onOpen={open}
               selected={selected}
               onMenu={openMenu}
+              filter={filtering ? filter : undefined}
             />
           ) : (
             <div className="empty">building map…</div>

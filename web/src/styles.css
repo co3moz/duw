@@ -340,6 +340,56 @@ button {
   align-self: flex-start;
 }
 
+/* ---------- filters ---------- */
+
+.filters {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px 0;
+  flex-wrap: wrap;
+}
+.filters input {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 3px 6px;
+  min-width: 0;
+}
+.filters input::placeholder {
+  color: var(--fg-faint);
+}
+.filter-q {
+  flex: 1 1 110px;
+}
+.filter-ext {
+  width: 68px;
+}
+.filter-min,
+.filter-max {
+  width: 62px;
+}
+.filter-age {
+  width: 78px;
+}
+.filter-clear {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--fg-dim);
+}
+.filter-clear:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+.filter-note {
+  padding: 0 12px 6px;
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+
 .panel-body {
   flex: 1;
   overflow-y: auto;

@@ -93,3 +93,15 @@ export function useResource<T>(load: (signal: AbortSignal) => Promise<T>, deps: 
 
   return { data, error }
 }
+
+/** Trails `value` by `ms`, so a fast typist does not trigger a fetch per key. */
+export function useDebounced<T>(value: T, ms: number): T {
+  const [debounced, setDebounced] = useState(value)
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), ms)
+    return () => window.clearTimeout(timer)
+  }, [value, ms])
+
+  return debounced
+}

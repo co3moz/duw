@@ -115,7 +115,36 @@ export interface SubtreeNode {
   kind: Kind
   size: number
   alloc: number
+  mtime: number
   children?: SubtreeNode[]
+}
+
+export interface SearchHit {
+  id: number
+  parent: number
+  name: string
+  kind: Kind
+  path: string
+  size: number
+  alloc: number
+  mtime: number
+  ext: string | null
+}
+
+/** Filter used by the search endpoint and the treemap. */
+export interface FilterSpec {
+  /** Lowercased name substring. */
+  q: string
+  /** Lowercased extensions, without the dot. */
+  exts: string[]
+  min: number
+  max: number
+  /** Unix seconds; `0` means no age bound. */
+  maxMtime: number
+}
+
+export function filterActive(f: FilterSpec): boolean {
+  return f.q !== '' || f.exts.length > 0 || f.min > 0 || f.max < Number.MAX_SAFE_INTEGER || f.maxMtime > 0
 }
 
 export interface ExtStat {
@@ -164,6 +193,33 @@ export const api = {
       `/api/largest/${id}?metric=${metric}&limit=${limit}`,
       signal,
     ),
+
+  search: (
+    id: number,
+    params: {
+      q: string
+      ext: string
+      min?: number
+      max?: number
+      age?: number
+      metric: Metric
+      limit: number
+    },
+    signal?: AbortSignal,
+  ) => {
+    const qs = new URLSearchParams()
+    if (params.q) qs.set('q', params.q)
+    if (params.ext) qs.set('ext', params.ext)
+    if (params.min != null) qs.set('min', String(params.min))
+    if (params.max != null) qs.set('max', String(params.max))
+    if (params.age != null) qs.set('age', String(params.age))
+    qs.set('metric', params.metric)
+    qs.set('limit', String(params.limit))
+    return get<{ hits: SearchHit[]; version: number; truncated: boolean }>(
+      `/api/search/${id}?${qs.toString()}`,
+      signal,
+    )
+  },
 
   errors: (signal?: AbortSignal) => get<ScanError[]>('/api/errors', signal),
 

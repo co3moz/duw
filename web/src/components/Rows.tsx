@@ -1,4 +1,4 @@
-import type { Entry, ExtStat, LargeFile, Metric, Rollup } from '../api'
+import type { Entry, ExtStat, LargeFile, Metric, Rollup, SearchHit } from '../api'
 import {
   CATEGORY_COLOR,
   CATEGORY_LABEL,
@@ -240,6 +240,50 @@ export function LargestRows({
             <span className="row-pct">{percent(v, total).toFixed(1)}%</span>
             <span className="row-size">{bytes(v)}</span>
             {onMenu && <MenuButton id={f.id} name={name} onMenu={onMenu} />}
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
+/** Results of a filtered subtree search. */
+export function SearchRows({
+  hits,
+  metric,
+  total,
+  onOpen,
+  onMenu,
+}: {
+  hits: SearchHit[]
+  metric: Metric
+  total: number
+  /** Double-clicking a file opens its folder; a directory opens itself. */
+  onOpen: (hit: SearchHit) => void
+  onMenu?: MenuHandler
+}) {
+  if (!hits.length) return <p className="empty">No matches.</p>
+  return (
+    <ul className="rows">
+      {hits.map((h) => {
+        const v = value(h, metric)
+        const slash = h.path.lastIndexOf('/')
+        const dir = slash >= 0 ? h.path.slice(0, slash) : ''
+        const cat: Category = h.kind === 'dir' ? 'folder' : categoryOf(h.ext)
+        return (
+          <li key={h.id} className="row" onDoubleClick={() => onOpen(h)}>
+            <span className="row-icon" style={{ color: CATEGORY_COLOR[cat] }}>
+              {h.kind === 'dir' ? '▣' : h.kind === 'link' ? '↗' : '▪'}
+            </span>
+            <span className="row-name row-path" title={h.path}>
+              <span className="path-base">{h.name}</span>
+              {dir && <span className="path-dir">{dir}</span>}
+            </span>
+            <span className="row-meta">{mtime(h.mtime)}</span>
+            <Bar pct={percent(v, total)} color={CATEGORY_COLOR[cat]} />
+            <span className="row-pct">{percent(v, total).toFixed(1)}%</span>
+            <span className="row-size">{bytes(v)}</span>
+            {onMenu && <MenuButton id={h.id} name={h.name} onMenu={onMenu} />}
           </li>
         )
       })}

@@ -410,6 +410,7 @@ impl Tree {
             kind: n.kind,
             size: n.total_size,
             alloc: n.total_alloc,
+            mtime: n.mtime,
             children: Vec::new(),
         };
         if n.kind != Kind::Dir || depth == 0 || *budget == 0 {
@@ -503,6 +504,51 @@ impl Tree {
                 mtime: self.nodes[idx as usize].mtime,
             })
             .collect()
+    }
+
+    /// Entries anywhere under `id` that match `filter`, biggest first. Matching
+    /// nodes are collected up to `cap` before sorting, which keeps a query that
+    /// matches half the tree from growing without bound.
+    pub fn search(
+        &self,
+        id: u32,
+        filter: &SearchFilter<'_>,
+        by_alloc: bool,
+        limit: usize,
+        cap: usize,
+    ) -> Vec<SearchHit> {
+        let mut hits = Vec::new();
+        let mut stack: Vec<u32> = match self.get(id) {
+            Some(n) => n.children.clone(),
+            None => return hits,
+        };
+        while let Some(cur) = stack.pop() {
+            let n = &self.nodes[cur as usize];
+            if filter.matches(self, n, by_alloc) {
+                hits.push(SearchHit {
+                    id: cur,
+                    parent: n.parent,
+                    name: n.name.to_string(),
+                    kind: n.kind,
+                    path: self.rel_path(cur),
+                    size: n.total_size,
+                    alloc: n.total_alloc,
+                    mtime: n.mtime,
+                    ext: self.ext_name(n.ext).map(|s| s.to_string()),
+                });
+                if hits.len() >= cap {
+                    break;
+                }
+            }
+            if n.kind == Kind::Dir {
+                stack.extend(n.children.iter().copied());
+            }
+        }
+
+        let key = |h: &SearchHit| if by_alloc { h.alloc } else { h.size };
+        hits.sort_unstable_by(|a, b| key(b).cmp(&key(a)).then_with(|| a.name.cmp(&b.name)));
+        hits.truncate(limit);
+        hits
     }
 
     /// Files under `id` worth considering as duplicate candidates: real files
@@ -624,6 +670,7 @@ pub struct SubtreeNode {
     pub kind: Kind,
     pub size: u64,
     pub alloc: u64,
+    pub mtime: i64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<SubtreeNode>,
 }
@@ -643,6 +690,74 @@ pub struct LargeFile {
     pub size: u64,
     pub alloc: u64,
     pub mtime: i64,
+}
+
+/// Filter for [`Tree::search`]. An empty query or extension list and the
+/// extreme size bounds mean "no restriction".
+pub struct SearchFilter<'a> {
+    /// Lowercased substring the name must contain.
+    pub query: &'a str,
+    /// Lowercased extensions a file must have; empty means any.
+    pub exts: &'a [String],
+    pub min: u64,
+    pub max: u64,
+    /// Only entries modified at or before this unix time.
+    pub max_mtime: Option<i64>,
+}
+
+impl SearchFilter<'_> {
+    fn matches(&self, tree: &Tree, n: &Node, by_alloc: bool) -> bool {
+        if !self.query.is_empty() && !contains_fold(&n.name, self.query) {
+            return false;
+        }
+        if !self.exts.is_empty() {
+            let ext = tree.ext_name(n.ext).unwrap_or("");
+            if !self.exts.iter().any(|e| e == ext) {
+                return false;
+            }
+        }
+        let size = if by_alloc {
+            n.total_alloc
+        } else {
+            n.total_size
+        };
+        if size < self.min || size > self.max {
+            return false;
+        }
+        if let Some(t) = self.max_mtime {
+            if n.mtime > t {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+#[derive(Serialize)]
+pub struct SearchHit {
+    pub id: u32,
+    pub parent: u32,
+    pub name: String,
+    pub kind: Kind,
+    pub path: String,
+    pub size: u64,
+    pub alloc: u64,
+    pub mtime: i64,
+    pub ext: Option<String>,
+}
+
+/// ASCII case-insensitive `contains`, avoiding an allocation per entry.
+fn contains_fold(haystack: &str, needle: &str) -> bool {
+    let hay = haystack.as_bytes();
+    let ned = needle.as_bytes();
+    if ned.is_empty() {
+        return true;
+    }
+    if ned.len() > hay.len() {
+        return false;
+    }
+    hay.windows(ned.len())
+        .any(|w| w.iter().zip(ned).all(|(a, b)| a.eq_ignore_ascii_case(b)))
 }
 
 /// Lowercased extension of a file name, or `None` for dotfiles and names
@@ -827,6 +942,75 @@ mod tests {
         let deep = t.nodes[sub as usize].children[0];
         assert!(!t.remove(deep));
         assert_eq!(t.stats.size, 1000);
+    }
+
+    #[test]
+    fn search_matches_name_ext_size_and_age() {
+        let mut t = Tree::new("root".into(), 0, 0, 0);
+        let dirs = t.add_children(
+            ROOT,
+            vec![
+                entry("photos", Kind::Dir, 0),
+                entry("old.txt", Kind::File, 10),
+            ],
+        );
+        let mut pic = entry("holiday.PNG", Kind::File, 5000);
+        pic.mtime = 1000;
+        let mut recent = entry("recent.png", Kind::File, 7000);
+        recent.mtime = 9000;
+        t.add_children(
+            dirs[0],
+            vec![pic, recent, entry("notes.txt", Kind::File, 10)],
+        );
+
+        let exts = vec!["png".to_string()];
+        let f = SearchFilter {
+            query: "holi",
+            exts: &exts,
+            min: 0,
+            max: u64::MAX,
+            max_mtime: None,
+        };
+        let hits = t.search(ROOT, &f, false, 10, 100);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, "photos/holiday.PNG");
+        assert_eq!(hits[0].parent, dirs[0]);
+
+        let none: Vec<String> = Vec::new();
+        // recent.png is large enough but too new, so only the old directory
+        // qualifies: directories match on their aggregate size and mtime.
+        let f = SearchFilter {
+            query: "",
+            exts: &none,
+            min: 6000,
+            max: u64::MAX,
+            max_mtime: Some(500),
+        };
+        let hits = t.search(ROOT, &f, false, 10, 100);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "photos");
+
+        let f = SearchFilter {
+            query: "",
+            exts: &none,
+            min: 6000,
+            max: u64::MAX,
+            max_mtime: Some(9500),
+        };
+        let hits = t.search(ROOT, &f, false, 10, 100);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].name, "photos");
+        assert_eq!(hits[1].name, "recent.png");
+
+        // An extension filter never matches directories, even by name.
+        let f = SearchFilter {
+            query: "photos",
+            exts: &exts,
+            min: 0,
+            max: u64::MAX,
+            max_mtime: None,
+        };
+        assert!(t.search(ROOT, &f, false, 10, 100).is_empty());
     }
 
     #[test]
