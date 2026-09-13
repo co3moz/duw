@@ -5,6 +5,7 @@ mod dupes;
 mod fsext;
 mod scan;
 mod server;
+mod snapshots;
 mod tree;
 
 use std::net::{IpAddr, SocketAddr};

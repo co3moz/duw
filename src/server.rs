@@ -9,7 +9,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -21,6 +21,7 @@ use crate::assets;
 use crate::dupes::{DupeGroup, DupeProgress, Dupes, Phase};
 use crate::fsext;
 use crate::scan::Scanner;
+use crate::snapshots;
 use crate::tree::{
     Crumb, Entry, ExtStat, LargeFile, Rollup, SearchFilter, SearchHit, Stats, SubtreeNode, ROOT,
 };
@@ -57,6 +58,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/abs/{id}", get(abs_path))
         .route("/api/reveal/{id}", post(reveal))
         .route("/api/trash/{id}", post(trash_node))
+        .route("/api/snapshots", get(list_snapshots).post(save_snapshot))
+        .route("/api/snapshots/{name}", delete(delete_snapshot))
+        .route("/api/snapshots/{name}/diff", get(snapshot_diff))
         .route(
             "/api/duplicates/{id}",
             get(duplicates).post(start_duplicates),
@@ -480,6 +484,128 @@ async fn trash_node(
     state.scanner.tree.write().unwrap().remove(id);
     state.dupes.forget(id);
     StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Serialize)]
+struct SnapshotList {
+    snapshots: Vec<snapshots::SnapshotMeta>,
+    /// Where the files live, shown so users can find (or back up) them.
+    dir: String,
+}
+
+async fn list_snapshots() -> impl IntoResponse {
+    let dir = snapshots::dir()
+        .map(|d| d.display().to_string())
+        .unwrap_or_default();
+    match snapshots::list() {
+        Ok(snapshots) => Json(SnapshotList { snapshots, dir }).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot list snapshots: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct SaveSnapshotQuery {
+    name: Option<String>,
+}
+
+/// Saves the current tree so a later scan can be compared against it. The
+/// tree is compact when the file count is manageable, but can still be sizable.
+async fn save_snapshot(
+    State(state): State<AppState>,
+    Query(q): Query<SaveSnapshotQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if cross_site(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-site request rejected").into_response();
+    }
+    if !state.scanner.is_done() {
+        return (StatusCode::CONFLICT, "a scan is still running").into_response();
+    }
+    let name = q
+        .name
+        .unwrap_or_else(|| format!("snapshot-{}", snapshots::now()));
+    if !snapshots::valid_name(&name) {
+        return (StatusCode::BAD_REQUEST, "invalid snapshot name").into_response();
+    }
+    let snapshot = snapshots::Snapshot {
+        name,
+        root: state.root.clone(),
+        created: snapshots::now(),
+        entries: state.scanner.tree.read().unwrap().snapshot_entries(),
+    };
+    match snapshots::save(&snapshot) {
+        Ok(()) => Json(snapshots::SnapshotMeta::of(&snapshot)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot save snapshot: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_snapshot(Path(name): Path<String>, headers: HeaderMap) -> impl IntoResponse {
+    if cross_site(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-site request rejected").into_response();
+    }
+    match snapshots::delete(&name) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            (StatusCode::NOT_FOUND, "no such snapshot").into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot delete snapshot: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct DiffQuery {
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct DiffResponse {
+    from: snapshots::SnapshotMeta,
+    to_root: String,
+    to_created: u64,
+    #[serde(flatten)]
+    diff: snapshots::DiffResult,
+}
+
+/// Compares a saved snapshot with the tree that is currently loaded.
+async fn snapshot_diff(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<DiffQuery>,
+) -> impl IntoResponse {
+    let from = match snapshots::load(&name) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (StatusCode::NOT_FOUND, "no such snapshot").into_response()
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cannot read snapshot: {e}"),
+            )
+                .into_response()
+        }
+    };
+    let current = state.scanner.tree.read().unwrap().snapshot_entries();
+    let limit = q.limit.unwrap_or(200).clamp(1, MAX_LIMIT);
+    Json(DiffResponse {
+        from: snapshots::SnapshotMeta::of(&from),
+        to_root: state.root.clone(),
+        to_created: snapshots::now(),
+        diff: snapshots::diff(&from.entries, &current, limit),
+    })
+    .into_response()
 }
 
 #[derive(Deserialize)]

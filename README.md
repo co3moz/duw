@@ -42,6 +42,8 @@ cargo install duw
 - **Duplicates**: files with identical contents, grouped and sorted by how
   much deleting the copies would free. This one reads file contents, so it only
   runs when you ask for it.
+- **Snapshots**: save the current scan and compare a later one against it to
+  see what grew or shrank.
 - **Filters**: search by name, extension, size and age. Matching covers the
   whole folder in view and the treemap narrows with it.
 - **Actions**: right-click an entry (or use the ⋯ button) to reveal it in the

@@ -6,8 +6,9 @@ import { useDebounced, useLive, useResource, useThrottled } from './useLive'
 import { Treemap } from './components/Treemap'
 import { FolderRows, LargestRows, SearchRows, TypeRows } from './components/Rows'
 import { Duplicates } from './components/Duplicates'
+import { Snapshots } from './components/Snapshots'
 
-type Tab = 'folders' | 'types' | 'largest' | 'duplicates'
+type Tab = 'folders' | 'types' | 'largest' | 'duplicates' | 'snapshots'
 
 const LIST_LIMIT = 500
 const MAP_DEPTH = 3
@@ -357,6 +358,9 @@ export default function App() {
             >
               duplicates
             </button>
+            <button className={tab === 'snapshots' ? 'on' : ''} onClick={() => setTab('snapshots')}>
+              snapshots
+            </button>
           </div>
           <div className="panel-body">
             {tab === 'folders' &&
@@ -424,6 +428,7 @@ export default function App() {
                 onMenu={openMenu}
               />
             )}
+            {tab === 'snapshots' && <Snapshots root={state.root} />}
           </div>
         </section>
 

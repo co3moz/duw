@@ -167,6 +167,35 @@ export interface ScanError {
   message: string
 }
 
+export interface SnapshotMeta {
+  name: string
+  root: string
+  created: number
+  entries: number
+  bytes: number
+}
+
+export interface SnapshotChange {
+  path: string
+  kind: Kind
+  old: number
+  new: number
+  delta: number
+  added: boolean
+  removed: boolean
+}
+
+export interface SnapshotDiff {
+  from: SnapshotMeta
+  to_root: string
+  to_created: number
+  added_bytes: number
+  removed_bytes: number
+  net: number
+  total_changes: number
+  changes: SnapshotChange[]
+}
+
 async function get<T>(url: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(url, { signal })
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
@@ -222,6 +251,18 @@ export const api = {
   },
 
   errors: (signal?: AbortSignal) => get<ScanError[]>('/api/errors', signal),
+
+  snapshots: (signal?: AbortSignal) =>
+    get<{ snapshots: SnapshotMeta[]; dir: string }>('/api/snapshots', signal),
+
+  saveSnapshot: (name: string) =>
+    fetch(`/api/snapshots?name=${encodeURIComponent(name)}`, { method: 'POST' }),
+
+  deleteSnapshot: (name: string) =>
+    fetch(`/api/snapshots/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+
+  snapshotDiff: (name: string, limit: number, signal?: AbortSignal) =>
+    get<SnapshotDiff>(`/api/snapshots/${encodeURIComponent(name)}/diff?limit=${limit}`, signal),
 
   cancel: () => fetch('/api/cancel', { method: 'POST' }),
 

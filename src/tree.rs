@@ -7,13 +7,13 @@
 
 use std::collections::HashMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const ROOT: u32 = 0;
 /// Sentinel for "this node has no extension".
 pub const NO_EXT: u32 = u32::MAX;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     Dir,
@@ -551,6 +551,28 @@ impl Tree {
         hits
     }
 
+    /// Every non-directory entry with its path relative to the scan root.
+    /// Directory totals are sums of these, so a snapshot only needs the leaves.
+    pub fn snapshot_entries(&self) -> Vec<SnapEntry> {
+        let mut out = Vec::new();
+        let mut stack = vec![ROOT];
+        while let Some(cur) = stack.pop() {
+            let n = &self.nodes[cur as usize];
+            if n.kind == Kind::Dir {
+                stack.extend(n.children.iter().copied());
+            } else {
+                out.push(SnapEntry {
+                    path: self.rel_path(cur),
+                    kind: n.kind,
+                    size: n.self_size,
+                    alloc: n.self_alloc,
+                    mtime: n.mtime,
+                });
+            }
+        }
+        out
+    }
+
     /// Files under `id` worth considering as duplicate candidates: real files
     /// of at least `min_size` whose bytes are actually on this disk. Paths are
     /// built during the walk rather than looked up per file.
@@ -744,6 +766,16 @@ pub struct SearchHit {
     pub alloc: u64,
     pub mtime: i64,
     pub ext: Option<String>,
+}
+
+/// One leaf of a saved scan, used to diff two points in time.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SnapEntry {
+    pub path: String,
+    pub kind: Kind,
+    pub size: u64,
+    pub alloc: u64,
+    pub mtime: i64,
 }
 
 /// ASCII case-insensitive `contains`, avoiding an allocation per entry.
