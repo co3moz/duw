@@ -369,6 +369,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-stream",
+ "tower",
  "trash",
  "windows-sys 0.59.0",
 ]

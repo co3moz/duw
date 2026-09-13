@@ -2,15 +2,14 @@
 //!
 //! Three stages, each one only looking at what survived the previous:
 //!
-//! 1. group by size, which is free because the tree already knows every size,
+//! 1. refresh metadata and group by current size,
 //! 2. hash a small window at each end of the file, which separates files that
 //!    merely share a header,
 //! 3. hash the whole file.
 //!
 //! In a typical tree the first stage decides almost everything, so the number
 //! of files actually read is a small fraction of the number scanned. Digests
-//! are cached per node, so lowering the size threshold from the UI only reads
-//! the files that were not candidates before.
+//! are recomputed on each run so a rescan also observes changed file contents.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -23,6 +22,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 use serde::Serialize;
 
+use crate::fsext;
 use crate::tree::{Candidate, Tree};
 
 /// Bytes read from each end of a file during the cheap stage.
@@ -100,11 +100,6 @@ pub struct Dupes {
     root: PathBuf,
     progress: Mutex<DupeProgress>,
     groups: RwLock<Vec<DupeGroup>>,
-    /// Full-file digests, keyed by node id. Valid for the life of the process:
-    /// the tree it refers to is a snapshot too.
-    full: Mutex<HashMap<u32, Digest>>,
-    /// Digests of the head and tail windows, same lifetime.
-    window: Mutex<HashMap<u32, Digest>>,
     /// Incremented per run; a worker whose generation is stale gives up.
     generation: AtomicU64,
 }
@@ -116,8 +111,6 @@ impl Dupes {
             root,
             progress: Mutex::new(DupeProgress::default()),
             groups: RwLock::new(Vec::new()),
-            full: Mutex::new(HashMap::new()),
-            window: Mutex::new(HashMap::new()),
             generation: AtomicU64::new(0),
         })
     }
@@ -133,10 +126,9 @@ impl Dupes {
     /// Starts a run in the background, replacing whatever was running. Returns
     /// the generation number of the new run.
     pub fn start(self: &Arc<Self>, scope: u32, min_size: u64) -> u64 {
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-
-        {
+        let generation = {
             let mut p = self.progress.lock().unwrap();
+            let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
             *p = DupeProgress {
                 phase: Phase::Grouping,
                 scope,
@@ -144,36 +136,41 @@ impl Dupes {
                 generation,
                 ..DupeProgress::default()
             };
-        }
-        self.groups.write().unwrap().clear();
+            self.groups.write().unwrap().clear();
+            generation
+        };
 
         let me = Arc::clone(self);
         // The work is blocking file IO, so it never touches the async runtime.
-        let _ = std::thread::Builder::new()
+        if std::thread::Builder::new()
             .name("duw-dupes".into())
-            .spawn(move || me.run(scope, min_size, generation));
+            .spawn(move || me.run(scope, min_size, generation))
+            .is_err()
+        {
+            self.update(generation, |p| p.phase = Phase::Cancelled);
+        }
 
         generation
     }
 
     pub fn cancel(&self) {
         // Moving the generation on is enough: the worker checks it constantly.
-        self.generation.fetch_add(1, Ordering::SeqCst);
         let mut p = self.progress.lock().unwrap();
+        p.generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         if p.phase != Phase::Done {
             p.phase = Phase::Cancelled;
         }
     }
 
-    /// Drops a trashed file from the cached digests and from any group it was
-    /// part of, so the UI stops offering a file that is already gone.
-    pub fn forget(&self, id: u32) {
-        self.window.lock().unwrap().remove(&id);
-        self.full.lock().unwrap().remove(&id);
-
+    /// Drops removed files, including descendants of trashed directories,
+    /// and publishes a new revision so the UI refetches its result list.
+    pub fn forget_removed(&self) {
+        let tree = self.tree.read().unwrap();
+        let mut p = self.progress.lock().unwrap();
+        p.generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let mut groups = self.groups.write().unwrap();
         groups.retain_mut(|g| {
-            g.files.retain(|f| f.id != id);
+            g.files.retain(|f| tree.get(f.id).is_some());
             g.wasted = g.size * g.files.len().saturating_sub(1) as u64;
             g.files.len() > 1
         });
@@ -181,7 +178,6 @@ impl Dupes {
         let group_count = groups.len() as u64;
         drop(groups);
 
-        let mut p = self.progress.lock().unwrap();
         p.groups = group_count;
         p.wasted = total_wasted;
         match p.phase {
@@ -190,13 +186,9 @@ impl Dupes {
             // generation no longer matches.
             Phase::Grouping | Phase::Windowing | Phase::Hashing => {
                 p.phase = Phase::Cancelled;
-                self.generation.fetch_add(1, Ordering::SeqCst);
             }
             // Force the UI to refetch the now smaller result list.
-            Phase::Done | Phase::Cancelled => {
-                self.generation.fetch_add(1, Ordering::SeqCst);
-            }
-            Phase::Idle => {}
+            Phase::Done | Phase::Cancelled | Phase::Idle => {}
         }
     }
 
@@ -208,10 +200,10 @@ impl Dupes {
         let started = Instant::now();
         let outcome = self.work(scope, min_size, generation, started);
 
-        if self.stale(generation) {
+        let mut p = self.progress.lock().unwrap();
+        if p.generation != generation {
             return;
         }
-        let mut p = self.progress.lock().unwrap();
         p.phase = if outcome {
             Phase::Done
         } else {
@@ -222,18 +214,28 @@ impl Dupes {
 
     /// Returns false when the run was superseded or cancelled.
     fn work(&self, scope: u32, min_size: u64, generation: u64, started: Instant) -> bool {
-        // Stage 1: size groups. Everything needed is already in the tree, so
-        // this costs no IO at all.
+        // Refresh sizes before grouping: the filesystem can change after the walk.
         let candidates = {
             let t = self.tree.read().unwrap();
-            t.duplicate_candidates(scope, min_size.max(1))
+            t.duplicate_candidates(scope, 1)
         };
         if self.stale(generation) {
             return false;
         }
 
         let mut by_size: HashMap<u64, Vec<Candidate>> = HashMap::new();
-        for c in candidates {
+        for mut c in candidates {
+            if self.stale(generation) {
+                return false;
+            }
+            let path = self.path_of(&c);
+            let Ok(md) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if !md.is_file() || fsext::is_cloud_backed(&md, &path) || md.len() < min_size.max(1) {
+                continue;
+            }
+            c.size = md.len();
             by_size.entry(c.size).or_default().push(c);
         }
         by_size.retain(|_, group| group.len() > 1);
@@ -355,21 +357,13 @@ impl Dupes {
     }
 
     fn window_digest(&self, c: &Candidate, generation: u64) -> Option<Digest> {
-        if let Some(d) = self.window.lock().unwrap().get(&c.id) {
-            return Some(*d);
-        }
         let d = hash_windows(&self.path_of(c), c.size)?;
-        self.window.lock().unwrap().insert(c.id, d);
         self.record_read(generation, WINDOW * 2);
         Some(d)
     }
 
     fn full_digest(&self, c: &Candidate, generation: u64) -> Option<Digest> {
-        if let Some(d) = self.full.lock().unwrap().get(&c.id) {
-            return Some(*d);
-        }
-        let d = hash_file(&self.path_of(c))?;
-        self.full.lock().unwrap().insert(c.id, d);
+        let d = hash_file(&self.path_of(c), c.size, || self.stale(generation))?;
         self.record_read(generation, c.size);
         Some(d)
     }
@@ -395,6 +389,10 @@ impl Dupes {
 /// Digest of the first and last `WINDOW` bytes, with the size mixed in so that
 /// a short file cannot collide with the head of a longer one.
 fn hash_windows(path: &Path, size: u64) -> Option<Digest> {
+    let before = std::fs::metadata(path).ok()?;
+    if before.len() != size || fsext::is_cloud_backed(&before, path) {
+        return None;
+    }
     let mut file = File::open(path).ok()?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(&size.to_le_bytes());
@@ -406,7 +404,7 @@ fn hash_windows(path: &Path, size: u64) -> Option<Digest> {
     read_exact_at(&mut file, size - WINDOW, &mut buf)?;
     hasher.update(&buf);
 
-    Some(*hasher.finalize().as_bytes())
+    unchanged(&before, &file.metadata().ok()?).then(|| *hasher.finalize().as_bytes())
 }
 
 fn read_exact_at(file: &mut File, offset: u64, buf: &mut [u8]) -> Option<()> {
@@ -414,11 +412,18 @@ fn read_exact_at(file: &mut File, offset: u64, buf: &mut [u8]) -> Option<()> {
     file.read_exact(buf).ok()
 }
 
-fn hash_file(path: &Path) -> Option<Digest> {
+fn hash_file(path: &Path, size: u64, cancelled: impl Fn() -> bool) -> Option<Digest> {
+    let before = std::fs::metadata(path).ok()?;
+    if before.len() != size || fsext::is_cloud_backed(&before, path) {
+        return None;
+    }
     let mut file = File::open(path).ok()?;
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; READ_BUF];
     loop {
+        if cancelled() {
+            return None;
+        }
         match file.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => hasher.update(&buf[..n]),
@@ -426,5 +431,108 @@ fn hash_file(path: &Path) -> Option<Digest> {
             Err(_) => return None,
         };
     }
-    Some(*hasher.finalize().as_bytes())
+    unchanged(&before, &file.metadata().ok()?).then(|| *hasher.finalize().as_bytes())
+}
+
+fn unchanged(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    before.len() == after.len() && before.modified().ok() == after.modified().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tree::{Kind, NewEntry, ROOT};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    struct Fixture {
+        root: PathBuf,
+        dupes: Arc<Dupes>,
+        dir: u32,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "duw-dupes-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&root).unwrap();
+            std::fs::create_dir(root.join("sub")).unwrap();
+            let mut tree = Tree::new("root".into(), 0, 0, 0);
+            let entry = |name: &str, kind, size| NewEntry {
+                name: name.into(),
+                kind,
+                size,
+                alloc: size,
+                mtime: 0,
+                err: false,
+                cloud: false,
+            };
+            let dir = tree.add_children(ROOT, vec![entry("sub", Kind::Dir, 0)])[0];
+            tree.add_children(
+                dir,
+                vec![entry("a", Kind::File, 4), entry("b", Kind::File, 4)],
+            );
+            for name in ["a", "b"] {
+                std::fs::write(root.join("sub").join(name), b"aaaa").unwrap();
+            }
+            let dupes = Dupes::new(Arc::new(RwLock::new(tree)), root.clone());
+            Self { root, dupes, dir }
+        }
+        fn run(&self, min: u64) {
+            let generation = self.dupes.progress().generation;
+            assert!(self.dupes.work(ROOT, min, generation, Instant::now()));
+            self.dupes.progress.lock().unwrap().phase = Phase::Done;
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            for name in ["a", "b"] {
+                let _ = std::fs::remove_file(self.root.join("sub").join(name));
+            }
+            let _ = std::fs::remove_dir(self.root.join("sub"));
+            let _ = std::fs::remove_dir(&self.root);
+        }
+    }
+
+    #[test]
+    fn rescan_observes_content_changes_and_new_sizes() {
+        let f = Fixture::new();
+        f.run(1);
+        assert_eq!(f.dupes.groups().len(), 1);
+        std::fs::write(f.root.join("sub/b"), b"bbbb").unwrap();
+        f.run(1);
+        assert!(f.dupes.groups().is_empty());
+        for name in ["a", "b"] {
+            std::fs::write(f.root.join("sub").join(name), b"larger").unwrap();
+        }
+        f.run(6);
+        assert_eq!(f.dupes.groups()[0].size, 6);
+    }
+
+    #[test]
+    fn removing_folder_clears_descendants_and_publishes_revision() {
+        let f = Fixture::new();
+        f.run(1);
+        let generation = f.dupes.progress().generation;
+        f.dupes.tree.write().unwrap().remove(f.dir);
+        f.dupes.forget_removed();
+        assert!(f.dupes.groups().is_empty());
+        let p = f.dupes.progress();
+        assert_eq!(p.wasted, 0);
+        assert_eq!(p.groups, 0);
+        assert!(p.generation > generation);
+    }
+
+    #[test]
+    fn cancelling_invalidates_worker_updates_and_hash_reads() {
+        let f = Fixture::new();
+        f.dupes.cancel();
+        f.dupes.update(0, |p| p.phase = Phase::Done);
+        assert_eq!(f.dupes.progress().phase, Phase::Cancelled);
+        assert!(hash_file(&f.root.join("sub/a"), 4, || true).is_none());
+    }
 }

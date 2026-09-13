@@ -15,7 +15,7 @@ export default defineConfig({
     port: 5173,
     // For UI work: run `duw --port 8080 --no-open <dir>` alongside `npm run dev`.
     proxy: {
-      '/api': { target: 'http://127.0.0.1:8080', changeOrigin: true },
+      '/api': { target: 'http://127.0.0.1:8080', changeOrigin: false },
     },
   },
 })

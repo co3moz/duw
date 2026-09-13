@@ -306,7 +306,18 @@ impl Tree {
     }
 
     pub fn get(&self, id: u32) -> Option<&Node> {
-        self.nodes.get(id as usize)
+        let node = self.nodes.get(id as usize)?;
+        let mut cur = id;
+        loop {
+            let ancestor = &self.nodes[cur as usize];
+            if ancestor.removed {
+                return None;
+            }
+            if cur == ROOT {
+                return Some(node);
+            }
+            cur = ancestor.parent;
+        }
     }
 
     /// Root -> `id` chain, root included.
@@ -434,13 +445,69 @@ impl Tree {
         limit: usize,
         budget: &mut usize,
     ) -> Option<SubtreeNode> {
+        self.subtree_with_sizes(id, by_alloc, depth, limit, budget, None)
+    }
+
+    /// Filter the complete scope before applying the map's display limits.
+    pub fn filtered_subtree(
+        &self,
+        id: u32,
+        filter: &SearchFilter<'_>,
+        by_alloc: bool,
+        depth: u16,
+        limit: usize,
+        budget: &mut usize,
+    ) -> Option<SubtreeNode> {
+        self.get(id)?;
+        let mut sizes: HashMap<u32, (u64, u64)> = HashMap::new();
+        let mut stack = vec![(id, false)];
+        while let Some((cur, visited)) = stack.pop() {
+            let n = &self.nodes[cur as usize];
+            if !visited && n.kind == Kind::Dir {
+                stack.push((cur, true));
+                stack.extend(n.children.iter().map(|&child| (child, false)));
+                continue;
+            }
+            // The scope itself is a container, not a search result.
+            let value = if cur != id && filter.matches(self, n, by_alloc) {
+                (n.total_size, n.total_alloc)
+            } else {
+                n.children
+                    .iter()
+                    .filter_map(|child| sizes.get(child))
+                    .fold((0, 0), |(size, alloc), &(s, a)| (size + s, alloc + a))
+            };
+            if value != (0, 0) || cur == id {
+                sizes.insert(cur, value);
+            }
+        }
+        self.subtree_with_sizes(id, by_alloc, depth, limit, budget, Some(&sizes))
+    }
+
+    fn subtree_with_sizes(
+        &self,
+        id: u32,
+        by_alloc: bool,
+        depth: u16,
+        limit: usize,
+        budget: &mut usize,
+        sizes: Option<&HashMap<u32, (u64, u64)>>,
+    ) -> Option<SubtreeNode> {
         let n = self.get(id)?;
+        let value = |id: u32| match sizes {
+            Some(sizes) => sizes.get(&id).copied().unwrap_or_default(),
+            None => {
+                let n = &self.nodes[id as usize];
+                (n.total_size, n.total_alloc)
+            }
+        };
+        let (size, alloc) = value(id);
         let mut out = SubtreeNode {
             id,
             name: n.name.to_string(),
             kind: n.kind,
-            size: n.total_size,
-            alloc: n.total_alloc,
+            size,
+            alloc,
             mtime: n.mtime,
             children: Vec::new(),
         };
@@ -449,25 +516,27 @@ impl Tree {
         }
 
         let mut ids = n.children.clone();
-        let metric = |t: &Tree, i: u32| {
-            let c = &t.nodes[i as usize];
+        let metric = |i: u32| {
+            let (size, alloc) = value(i);
             if by_alloc {
-                c.total_alloc
+                alloc
             } else {
-                c.total_size
+                size
             }
         };
-        ids.sort_unstable_by_key(|i| std::cmp::Reverse(metric(self, *i)));
+        ids.sort_unstable_by_key(|i| std::cmp::Reverse(metric(*i)));
 
         for child in ids.into_iter().take(limit) {
             if *budget == 0 {
                 break;
             }
-            if metric(self, child) == 0 {
+            if metric(child) == 0 {
                 break;
             }
             *budget -= 1;
-            if let Some(c) = self.subtree(child, by_alloc, depth - 1, limit, budget) {
+            if let Some(c) =
+                self.subtree_with_sizes(child, by_alloc, depth - 1, limit, budget, sizes)
+            {
                 out.children.push(c);
             }
         }
@@ -817,40 +886,14 @@ struct Frame {
 fn cmp_children(tree: &Tree, a: u32, b: u32) -> Ordering {
     let na = &tree.nodes[a as usize];
     let nb = &tree.nodes[b as usize];
-    let a_dir = na.kind == Kind::Dir;
-    let b_dir = nb.kind == Kind::Dir;
-    if a_dir == b_dir {
-        return na.name.cmp(&nb.name);
-    }
-    let ab = na.name.as_bytes();
-    let bb = nb.name.as_bytes();
-    if ab.len() == bb.len() {
-        // Same name with different kinds cannot exist in one directory, but a
-        // directory key is the longer one either way.
-        return if a_dir {
-            Ordering::Greater
-        } else {
-            Ordering::Less
-        };
-    }
-    let min = ab.len().min(bb.len());
-    match ab[..min].cmp(&bb[..min]) {
-        Ordering::Equal => {}
-        ord => return ord,
-    }
-    // One name is a prefix of the other; the directory side continues with a
-    // separator that the file side does not have.
-    if ab.len() < bb.len() {
-        if a_dir {
-            b'/'.cmp(&bb[min])
-        } else {
-            Ordering::Less
-        }
-    } else if b_dir {
-        ab[min].cmp(&b'/')
-    } else {
-        Ordering::Greater
-    }
+    na.name
+        .bytes()
+        .chain((na.kind == Kind::Dir).then_some(b'/'))
+        .cmp(
+            nb.name
+                .bytes()
+                .chain((nb.kind == Kind::Dir).then_some(b'/')),
+        )
 }
 
 /// Streams the tree's files in byte-lexicographic path order: a depth-first
@@ -985,6 +1028,87 @@ fn extension_of(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sorted_files_handle_equal_lengths_and_directory_prefixes() {
+        let mut t = Tree::new("root".into(), 0, 0, 0);
+        let dirs = t.add_children(
+            ROOT,
+            vec![
+                entry("a", Kind::Dir, 0),
+                entry("a.b", Kind::Dir, 0),
+                entry("aaaaa", Kind::Dir, 0),
+                entry("bb", Kind::File, 1),
+                entry("z", Kind::File, 1),
+                entry("zzzzz", Kind::File, 1),
+            ],
+        );
+        for dir in dirs {
+            t.add_children(dir, vec![entry("x", Kind::File, 1)]);
+        }
+        let mut source = t.sorted_files();
+        let mut paths = Vec::new();
+        while source.advance().unwrap() {
+            paths.push(source.path().to_string());
+        }
+        assert_eq!(paths, ["a.b/x", "a/x", "aaaaa/x", "bb", "z", "zzzzz"]);
+        let children = &t.nodes[ROOT as usize].children;
+        for &a in children {
+            for &b in children {
+                for &c in children {
+                    if cmp_children(&t, a, b).is_lt() && cmp_children(&t, b, c).is_lt() {
+                        assert!(cmp_children(&t, a, c).is_lt());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn removed_subtrees_are_not_addressable() {
+        let mut t = Tree::new("root".into(), 0, 0, 0);
+        let dir = t.add_children(ROOT, vec![entry("sub", Kind::Dir, 0)])[0];
+        t.add_children(dir, vec![entry("file", Kind::File, 1)]);
+        let file = t.nodes[dir as usize].children[0];
+        t.remove(dir);
+        assert!(t.get(dir).is_none());
+        assert!(t.get(file).is_none());
+        assert!(t
+            .children_view(dir, false, SortKey::Size, false, 10)
+            .is_none());
+        assert!(t.duplicate_candidates(dir, 1).is_empty());
+    }
+
+    #[test]
+    fn map_filters_before_depth_and_child_limits() {
+        let mut t = Tree::new("root".into(), 0, 0, 0);
+        let mut entries = (0..65)
+            .map(|i| entry(&format!("big{i}.bin"), Kind::File, 1000))
+            .collect::<Vec<_>>();
+        entries.push(entry("deep", Kind::Dir, 0));
+        let mut dir = t.add_children(ROOT, entries)[0];
+        for _ in 0..4 {
+            dir = t.add_children(dir, vec![entry("nested", Kind::Dir, 0)])[0];
+        }
+        t.add_children(dir, vec![entry("needle.txt", Kind::File, 20)]);
+        let exts = vec!["txt".into()];
+        let filter = SearchFilter {
+            query: "needle",
+            exts: &exts,
+            min: 0,
+            max: u64::MAX,
+            max_mtime: None,
+        };
+        let hits = t.search(ROOT, &filter, false, 500, 20_000);
+        assert_eq!(hits.len(), 1);
+        let map = t
+            .filtered_subtree(ROOT, &filter, false, 3, 60, &mut 4000)
+            .unwrap();
+        assert_eq!(map.size, 20);
+        assert_eq!(map.children.len(), 1);
+        assert_eq!(map.children[0].name, "deep");
+        assert_eq!(map.children[0].children[0].children[0].size, 20);
+    }
 
     fn entry(name: &str, kind: Kind, size: u64) -> NewEntry {
         NewEntry {

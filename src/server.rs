@@ -5,10 +5,13 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::Request;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
+use axum::response::Response;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -67,6 +70,7 @@ pub fn router(state: AppState) -> Router {
             get(duplicates).post(start_duplicates),
         )
         .route("/api/duplicates/cancel", post(cancel_duplicates))
+        .route_layer(middleware::from_fn(protect_mutations))
         .fallback(assets::serve)
         .with_state(state)
 }
@@ -269,14 +273,6 @@ async fn node(
     .into_response()
 }
 
-#[derive(Deserialize)]
-struct TreeQuery {
-    #[serde(default)]
-    metric: Metric,
-    depth: Option<u16>,
-    limit: Option<usize>,
-}
-
 #[derive(Serialize)]
 struct TreeResponse {
     root: SubtreeNode,
@@ -287,13 +283,20 @@ struct TreeResponse {
 async fn subtree(
     State(state): State<AppState>,
     Path(id): Path<u32>,
-    Query(q): Query<TreeQuery>,
+    Query(q): Query<SearchParams>,
 ) -> impl IntoResponse {
     let t = state.scanner.tree.read().unwrap();
     let depth = q.depth.unwrap_or(3).clamp(1, 8);
     let limit = q.limit.unwrap_or(60).clamp(1, 500);
     let mut budget = TREEMAP_BUDGET;
-    let Some(root) = t.subtree(id, q.metric.by_alloc(), depth, limit, &mut budget) else {
+    let root = if q.has_filter() {
+        q.with_filter(|filter| {
+            t.filtered_subtree(id, filter, q.metric.by_alloc(), depth, limit, &mut budget)
+        })
+    } else {
+        t.subtree(id, q.metric.by_alloc(), depth, limit, &mut budget)
+    };
+    let Some(root) = root else {
         return (StatusCode::NOT_FOUND, "no such node").into_response();
     };
     Json(TreeResponse {
@@ -352,6 +355,7 @@ async fn errors(State(state): State<AppState>) -> impl IntoResponse {
 
 #[derive(Deserialize)]
 struct SearchParams {
+    depth: Option<u16>,
     q: Option<String>,
     /// Comma-separated extensions, with or without a leading dot.
     ext: Option<String>,
@@ -362,6 +366,43 @@ struct SearchParams {
     #[serde(default)]
     metric: Metric,
     limit: Option<usize>,
+}
+
+impl SearchParams {
+    fn has_filter(&self) -> bool {
+        self.q.is_some()
+            || self.ext.is_some()
+            || self.min.is_some()
+            || self.max.is_some()
+            || self.age.is_some()
+    }
+
+    fn with_filter<R>(&self, f: impl FnOnce(&SearchFilter<'_>) -> R) -> R {
+        let query = self
+            .q
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let exts: Vec<String> = self
+            .ext
+            .as_deref()
+            .unwrap_or_default()
+            .split(',')
+            .map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase())
+            .filter(|e| !e.is_empty())
+            .collect();
+        let now = snapshots::now().min(i64::MAX as u64) as i64;
+        f(&SearchFilter {
+            query: &query,
+            exts: &exts,
+            min: self.min.unwrap_or(0),
+            max: self.max.unwrap_or(u64::MAX),
+            max_mtime: self.age.map(|days| {
+                now.saturating_sub(days.saturating_mul(86_400).min(i64::MAX as u64) as i64)
+            }),
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -384,28 +425,9 @@ async fn search(
         return (StatusCode::NOT_FOUND, "no such node").into_response();
     }
 
-    let query = p.q.unwrap_or_default().to_ascii_lowercase();
-    let exts: Vec<String> = p
-        .ext
-        .unwrap_or_default()
-        .split(',')
-        .map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase())
-        .filter(|e| !e.is_empty())
-        .collect();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let filter = SearchFilter {
-        query: &query,
-        exts: &exts,
-        min: p.min.unwrap_or(0),
-        max: p.max.unwrap_or(u64::MAX),
-        max_mtime: p.age.map(|days| now - days as i64 * 86_400),
-    };
-
     let limit = p.limit.unwrap_or(500).clamp(1, MAX_LIMIT);
-    let mut hits = t.search(id, &filter, p.metric.by_alloc(), limit + 1, 20_000);
+    let mut hits =
+        p.with_filter(|filter| t.search(id, filter, p.metric.by_alloc(), limit + 1, 20_000));
     let truncated = hits.len() > limit;
     hits.truncate(limit);
 
@@ -439,9 +461,15 @@ fn cross_site(headers: &HeaderMap) -> bool {
     }
 }
 
+async fn protect_mutations(request: Request, next: Next) -> Response {
+    if !request.method().is_safe() && cross_site(request.headers()) {
+        return (StatusCode::FORBIDDEN, "cross-site request rejected").into_response();
+    }
+    next.run(request).await
+}
+
 /// Absolute path of a node, built from the scan root and the tree-relative
-/// path. It never touches the filesystem, so it also works for entries that
-/// have been removed from the tree.
+/// path. Removed entries and descendants of removed directories are rejected.
 fn node_path(state: &AppState, id: u32) -> Option<std::path::PathBuf> {
     let t = state.scanner.tree.read().unwrap();
     t.get(id)?;
@@ -515,7 +543,7 @@ async fn trash_node(
     // The bytes are gone either way; a failed detach would only leave the tree
     // stale until the next scan.
     state.scanner.tree.write().unwrap().remove(id);
-    state.dupes.forget(id);
+    state.dupes.forget_removed();
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -698,12 +726,15 @@ async fn duplicates(
 }
 
 /// Starts (or restarts) a duplicate scan for one directory. Changing the
-/// threshold from the UI lands here, and cached digests make a rerun cheap.
+/// threshold from the UI lands here. Every run checks current file contents.
 async fn start_duplicates(
     State(state): State<AppState>,
     Path(id): Path<u32>,
     Query(q): Query<DupeQuery>,
 ) -> impl IntoResponse {
+    if !state.scanner.is_done() {
+        return (StatusCode::CONFLICT, "a scan is still running").into_response();
+    }
     if state.scanner.tree.read().unwrap().get(id).is_none() {
         return (StatusCode::NOT_FOUND, "no such node").into_response();
     }
@@ -715,4 +746,163 @@ async fn start_duplicates(
 async fn cancel_duplicates(State(state): State<AppState>) -> impl IntoResponse {
     state.dupes.cancel();
     StatusCode::ACCEPTED
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scan::ScanOpts;
+    use crate::tree::{Kind, NewEntry};
+    use axum::body::Body;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tower::ServiceExt;
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    struct Fixture {
+        state: AppState,
+        root: std::path::PathBuf,
+    }
+    impl Fixture {
+        fn new(done: bool) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "duw-api-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&root).unwrap();
+            let scanner = Scanner::new(ScanOpts {
+                root: root.clone(),
+                one_file_system: false,
+                dereference: false,
+                count_links: false,
+                max_depth: None,
+                exclude: None,
+                threads: Some(1),
+                local_only: true,
+            })
+            .unwrap();
+            if done {
+                scanner.run();
+            }
+            let dupes = Dupes::new(scanner.tree.clone(), root.clone());
+            let (_, shutdown) = watch::channel(false);
+            let state = AppState {
+                scanner,
+                dupes,
+                root: root.display().to_string(),
+                local_only: true,
+                dupes_min: 1,
+                shutdown,
+            };
+            Self { state, root }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir(&self.root);
+        }
+    }
+
+    #[tokio::test]
+    async fn all_mutations_reject_cross_site_requests() {
+        let f = Fixture::new(true);
+        for (method, path) in [
+            ("POST", "/api/cancel"),
+            ("POST", "/api/duplicates/0"),
+            ("POST", "/api/duplicates/cancel"),
+            ("POST", "/api/trash/0"),
+            ("POST", "/api/reveal/0"),
+            ("POST", "/api/snapshots"),
+            ("DELETE", "/api/snapshots/test"),
+        ] {
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("host", "127.0.0.1:8080")
+                .header("origin", "http://untrusted.example")
+                .body(Body::empty())
+                .unwrap();
+            let response = router(f.state.clone()).oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        }
+        assert!(!f.state.scanner.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn duplicates_wait_for_main_scan_and_dev_origin_is_accepted() {
+        let f = Fixture::new(false);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/duplicates/0")
+            .header("host", "localhost:5173")
+            .header("origin", "http://localhost:5173")
+            .body(Body::empty())
+            .unwrap();
+        let response = router(f.state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(f.state.dupes.progress().phase, Phase::Idle);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/cancel")
+            .header("host", "localhost:5173")
+            .header("origin", "http://localhost:5173")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router(f.state.clone())
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+    }
+
+    #[tokio::test]
+    async fn removed_ids_return_404_and_tree_accepts_search_filters() {
+        let f = Fixture::new(true);
+        {
+            let mut t = f.state.scanner.tree.write().unwrap();
+            t.add_children(
+                ROOT,
+                vec![NewEntry {
+                    name: "needle.txt".into(),
+                    kind: Kind::File,
+                    size: 12,
+                    alloc: 16,
+                    mtime: 0,
+                    err: false,
+                    cloud: false,
+                }],
+            );
+        }
+        let request = Request::builder()
+            .uri("/api/tree/0?q=needle&ext=txt&min=10&age=1&depth=3&limit=60")
+            .body(Body::empty())
+            .unwrap();
+        let response = router(f.state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(data["root"]["size"], 12);
+        f.state.scanner.tree.write().unwrap().remove(1);
+        for path in [
+            "/api/node/1",
+            "/api/tree/1",
+            "/api/abs/1",
+            "/api/duplicates/1",
+        ] {
+            let request = Request::builder().uri(path).body(Body::empty()).unwrap();
+            assert_eq!(
+                router(f.state.clone())
+                    .oneshot(request)
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::NOT_FOUND
+            );
+        }
+    }
 }

@@ -73,7 +73,7 @@ export function useThrottled(version: number, ms: number): number {
 /** Re-runs `load` whenever its inputs change, dropping out-of-order responses. */
 export function useResource<T>(load: (signal: AbortSignal) => Promise<T>, deps: unknown[]) {
   const [data, setData] = useState<T | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<Error | null>(null)
 
   useEffect(() => {
     const ac = new AbortController()
@@ -85,7 +85,7 @@ export function useResource<T>(load: (signal: AbortSignal) => Promise<T>, deps: 
         }
       })
       .catch((e) => {
-        if (!ac.signal.aborted) setError(String(e))
+        if (!ac.signal.aborted) setError(e instanceof Error ? e : new Error(String(e)))
       })
     return () => ac.abort()
     // eslint-disable-next-line react-hooks/exhaustive-deps

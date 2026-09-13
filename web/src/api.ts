@@ -200,9 +200,26 @@ export interface SnapshotDiff {
   changes: SnapshotChange[]
 }
 
+export class HttpError extends Error {
+  readonly status: number
+
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+  }
+}
+
+export interface SearchOptions {
+  q: string
+  ext: string
+  min?: number
+  max?: number
+  age?: number
+}
+
 async function get<T>(url: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(url, { signal })
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  if (!res.ok) throw new HttpError(res.status, `${res.status} ${res.statusText}`)
   return (await res.json()) as T
 }
 
@@ -215,9 +232,9 @@ export const api = {
       signal,
     ),
 
-  tree: (id: number, metric: Metric, depth: number, limit: number, signal?: AbortSignal) =>
+  tree: (id: number, metric: Metric, depth: number, limit: number, signal?: AbortSignal, filter?: SearchOptions) =>
     get<{ root: SubtreeNode; version: number; truncated: boolean }>(
-      `/api/tree/${id}?metric=${metric}&depth=${depth}&limit=${limit}`,
+      `/api/tree/${id}?metric=${metric}&depth=${depth}&limit=${limit}${filter ? '&' + searchQuery(filter) : ''}`,
       signal,
     ),
 
@@ -232,23 +249,13 @@ export const api = {
 
   search: (
     id: number,
-    params: {
-      q: string
-      ext: string
-      min?: number
-      max?: number
-      age?: number
+    params: SearchOptions & {
       metric: Metric
       limit: number
     },
     signal?: AbortSignal,
   ) => {
-    const qs = new URLSearchParams()
-    if (params.q) qs.set('q', params.q)
-    if (params.ext) qs.set('ext', params.ext)
-    if (params.min != null) qs.set('min', String(params.min))
-    if (params.max != null) qs.set('max', String(params.max))
-    if (params.age != null) qs.set('age', String(params.age))
+    const qs = searchQuery(params)
     qs.set('metric', params.metric)
     qs.set('limit', String(params.limit))
     return get<{ hits: SearchHit[]; version: number; truncated: boolean }>(
@@ -292,4 +299,14 @@ export const api = {
     fetch(`/api/duplicates/${id}?min=${min}`, { method: 'POST' }),
 
   cancelDuplicates: () => fetch('/api/duplicates/cancel', { method: 'POST' }),
+}
+
+function searchQuery(params: SearchOptions): URLSearchParams {
+  const qs = new URLSearchParams()
+  if (params.q) qs.set('q', params.q)
+  if (params.ext) qs.set('ext', params.ext)
+  if (params.min != null) qs.set('min', String(params.min))
+  if (params.max != null) qs.set('max', String(params.max))
+  if (params.age != null) qs.set('age', String(params.age))
+  return qs
 }

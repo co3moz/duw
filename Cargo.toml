@@ -45,3 +45,6 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

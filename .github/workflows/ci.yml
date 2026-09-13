@@ -147,6 +147,9 @@ jobs:
       - run: npm run build
         working-directory: web
 
+      - run: npm test
+        working-directory: web
+
       - name: Check the committed bundle is up to date
         run: |
           if [ -n "$(git status --porcelain -- web/dist)" ]; then

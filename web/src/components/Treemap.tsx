@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from 'react'
 import { hierarchy, treemap, treemapSquarify, type HierarchyRectangularNode } from 'd3-hierarchy'
-import { filterActive, type FilterSpec, type Metric, type SubtreeNode } from '../api'
+import { type Metric, type SubtreeNode } from '../api'
 import { CATEGORY_COLOR, ageColor, bytes, categoryOf, percent } from '../format'
 import { useElementSize } from '../useElementSize'
 import type { MenuHandler } from './Rows'
@@ -25,7 +25,6 @@ export function Treemap({
   onOpen,
   selected,
   onMenu,
-  filter,
   heat,
 }: {
   root: SubtreeNode
@@ -33,7 +32,6 @@ export function Treemap({
   onOpen: (id: number) => void
   selected: number | null
   onMenu?: MenuHandler
-  filter?: FilterSpec
   heat?: boolean
 }) {
   const [box, ref] = useElementSize<HTMLDivElement>()
@@ -41,9 +39,8 @@ export function Treemap({
   const wrap = useRef<HTMLDivElement>(null)
 
   const cells = useMemo(() => {
-    const tree = filter && filterActive(filter) ? prune(root, filter, metric) : root
-    return tree ? toCells(tree, metric) : null
-  }, [root, metric, filter])
+    return (metric === 'alloc' ? root.alloc : root.size) > 0 ? toCells(root, metric) : null
+  }, [root, metric])
 
   const layout = useMemo(() => {
     if (!cells) return null
@@ -176,39 +173,6 @@ function toCells(node: SubtreeNode, metric: Metric): Cell {
     })
   }
   return { id: node.id, name: node.name, kind: node.kind, value, mtime: node.mtime, children }
-}
-
-/**
- * Keeps only the cells that pass the filter. A directory survives when it
- * matches itself or when any descendant does; a surviving directory's value
- * becomes the sum of what is left, so the map shows matching bytes only.
- */
-function prune(node: SubtreeNode, f: FilterSpec, metric: Metric): SubtreeNode | null {
-  const kids = (node.children ?? [])
-    .map((c) => prune(c, f, metric))
-    .filter((c): c is SubtreeNode => c !== null)
-  if (kids.length) {
-    return {
-      ...node,
-      size: kids.reduce((a, c) => a + c.size, 0),
-      alloc: kids.reduce((a, c) => a + c.alloc, 0),
-      children: kids,
-    }
-  }
-  return matches(node, f, metric) ? { ...node, children: [] } : null
-}
-
-function matches(node: SubtreeNode, f: FilterSpec, metric: Metric): boolean {
-  if (f.q && !node.name.toLowerCase().includes(f.q)) return false
-  if (f.exts.length > 0) {
-    const dot = node.name.lastIndexOf('.')
-    const ext = dot > 0 ? node.name.slice(dot + 1).toLowerCase() : ''
-    if (!f.exts.includes(ext)) return false
-  }
-  const v = metric === 'alloc' ? node.alloc : node.size
-  if (v < f.min || v > f.max) return false
-  if (f.maxMtime > 0 && node.mtime > f.maxMtime) return false
-  return true
 }
 
 function clip(text: string, width: number): string {

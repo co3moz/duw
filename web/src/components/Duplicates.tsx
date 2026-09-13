@@ -24,6 +24,7 @@ const PHASE_LABEL: Record<DupeProgress['phase'], string> = {
 
 export function Duplicates({
   progress,
+  scanReady,
   groups,
   truncated,
   totalGroups,
@@ -36,6 +37,7 @@ export function Duplicates({
   onMenu,
 }: {
   progress: DupeProgress
+  scanReady: boolean
   groups: DupeGroup[]
   truncated: boolean
   totalGroups: number
@@ -59,7 +61,7 @@ export function Duplicates({
           <select
             value={minSize}
             onChange={(e) => onMinSize(Number(e.target.value))}
-            disabled={running}
+            disabled={running || !scanReady}
           >
             {THRESHOLDS.map((t) => (
               <option key={t.value} value={t.value}>
@@ -74,8 +76,8 @@ export function Duplicates({
             stop
           </button>
         ) : (
-          <button className="dupes-run" onClick={onScan}>
-            {done ? 'rescan' : `scan ${scopeName}`}
+          <button className="dupes-run" onClick={onScan} disabled={!scanReady}>
+            {!scanReady ? 'waiting for folder scan' : done ? 'rescan' : `scan ${scopeName}`}
           </button>
         )}
 

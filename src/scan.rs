@@ -106,7 +106,7 @@ impl Scanner {
         let me = Arc::clone(self);
         pool.scope(move |s| {
             let inner = Arc::clone(&me);
-            s.spawn(move |s| inner.walk(ROOT, root_path, 0, s));
+            s.spawn(move |s| inner.walk(ROOT, root_path, 0, Vec::new(), s));
         });
 
         self.finish();
@@ -121,9 +121,36 @@ impl Scanner {
         self.done.store(true, Ordering::Release);
     }
 
-    fn walk(self: Arc<Self>, id: u32, path: PathBuf, depth: u16, scope: &rayon::Scope<'_>) {
+    fn walk(
+        self: Arc<Self>,
+        id: u32,
+        path: PathBuf,
+        depth: u16,
+        mut ancestors: Vec<PathBuf>,
+        scope: &rayon::Scope<'_>,
+    ) {
         if self.is_cancelled() {
             return;
+        }
+
+        if self.opts.dereference {
+            let resolved = match fs::canonicalize(&path) {
+                Ok(resolved) => resolved,
+                Err(e) => {
+                    let mut t = self.tree.write().unwrap();
+                    t.mark_read(id, true);
+                    t.record_error(path.display().to_string(), e.to_string());
+                    return;
+                }
+            };
+            if ancestors.contains(&resolved) {
+                let mut t = self.tree.write().unwrap();
+                t.mark_read(id, true);
+                t.stats.skipped += 1;
+                t.record_error(path.display().to_string(), "symbolic link cycle".into());
+                return;
+            }
+            ancestors.push(resolved);
         }
 
         let rd = match fs::read_dir(&path) {
@@ -144,6 +171,9 @@ impl Scanner {
         let recurse = self.opts.max_depth.is_none_or(|max| depth < max);
 
         for de in rd {
+            if self.is_cancelled() {
+                break;
+            }
             let de = match de {
                 Ok(de) => de,
                 Err(e) => {
@@ -280,7 +310,8 @@ impl Scanner {
         debug_assert_eq!(dir_ids.len(), subdirs.len());
         for (child_id, child_path) in dir_ids.into_iter().zip(subdirs) {
             let me = Arc::clone(&self);
-            scope.spawn(move |s| me.walk(child_id, child_path, depth + 1, s));
+            let ancestors = ancestors.clone();
+            scope.spawn(move |s| me.walk(child_id, child_path, depth + 1, ancestors, s));
         }
     }
 
@@ -298,5 +329,37 @@ fn display_root(path: &Path) -> String {
     match path.file_name() {
         Some(n) => n.to_string_lossy().into_owned(),
         None => path.display().to_string(),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dereference_stops_at_ancestor_cycle() {
+        let root = std::env::temp_dir().join(format!("duw-cycle-test-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("file"), b"hello").unwrap();
+        std::os::unix::fs::symlink(&root, root.join("back")).unwrap();
+        let scanner = Scanner::new(ScanOpts {
+            root: root.clone(),
+            one_file_system: false,
+            dereference: true,
+            count_links: false,
+            max_depth: None,
+            exclude: None,
+            threads: Some(1),
+            local_only: false,
+        })
+        .unwrap();
+        scanner.run();
+        let t = scanner.tree.read().unwrap();
+        assert_eq!(t.stats.files, 1);
+        assert_eq!(t.stats.skipped, 1);
+        assert!(t.errors.iter().any(|e| e.message == "symbolic link cycle"));
+        fs::remove_file(root.join("back")).unwrap();
+        fs::remove_file(root.join("file")).unwrap();
+        fs::remove_dir(root).unwrap();
     }
 }

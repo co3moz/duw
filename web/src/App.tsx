@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, filterActive, type FilterSpec, type Kind, type Metric, type SortKey } from './api'
+import { api, HttpError, filterActive, type FilterSpec, type Kind, type Metric, type SortKey } from './api'
 import { bytes, count, duration, parseSize, AGE_STOPS } from './format'
 import { useElementSize } from './useElementSize'
 import { useDebounced, useLive, useResource, useThrottled } from './useLive'
@@ -68,7 +68,8 @@ export default function App() {
   const dage = useDebounced(filters.age, 250)
   const minBytes = dmin.trim() ? parseSize(dmin) : null
   const maxBytes = dmax.trim() ? parseSize(dmax) : null
-  const ageDays = dage.trim() ? Number.parseInt(dage, 10) : null
+  const parsedAge = dage.trim() ? Number(dage) : NaN
+  const ageDays = Number.isSafeInteger(parsedAge) && parsedAge >= 0 ? parsedAge : null
   const filter = useMemo<FilterSpec>(
     () => ({
       q: dq.trim().toLowerCase(),
@@ -86,14 +87,21 @@ export default function App() {
     [dq, dext, minBytes, maxBytes, ageDays],
   )
   const filtering = filterActive(filter)
+  const filterParams = useMemo(() => ({
+    q: filter.q,
+    ext: filter.exts.join(','),
+    min: filter.min > 0 ? filter.min : undefined,
+    max: filter.max < Number.MAX_SAFE_INTEGER ? filter.max : undefined,
+    age: ageDays ?? undefined,
+  }), [filter, ageDays])
 
   const node = useResource(
     (s) => api.node(nodeId, metric, LIST_LIMIT, sort.key, sort.asc, s),
     [nodeId, metric, version, sort],
   )
   const map = useResource(
-    (s) => api.tree(nodeId, metric, MAP_DEPTH, MAP_PER_LEVEL, s),
-    [nodeId, metric, version],
+    (s) => api.tree(nodeId, metric, MAP_DEPTH, MAP_PER_LEVEL, s, filtering ? filterParams : undefined),
+    [nodeId, metric, version, filtering, filterParams],
   )
   const search = useResource(
     (s) =>
@@ -101,18 +109,14 @@ export default function App() {
         ? api.search(
             nodeId,
             {
-              q: filter.q,
-              ext: filter.exts.join(','),
-              min: filter.min > 0 ? filter.min : undefined,
-              max: filter.max < Number.MAX_SAFE_INTEGER ? filter.max : undefined,
-              age: ageDays != null && Number.isFinite(ageDays) ? ageDays : undefined,
+              ...filterParams,
               metric,
               limit: LIST_LIMIT,
             },
             s,
           )
         : Promise.resolve(null),
-    [nodeId, metric, version, filtering, filter, ageDays],
+    [nodeId, metric, version, filtering, filterParams],
   )
   const types = useResource(
     (s) => (tab === 'types' ? api.types(nodeId, s) : Promise.resolve(null)),
@@ -137,9 +141,14 @@ export default function App() {
 
   const effectiveMin = minSize ?? state?.dupes_min ?? 524288
   const runDupes = useCallback(
-    (min: number) => {
+    async (min: number) => {
       setMinSize(min)
-      api.startDuplicates(nodeId, min)
+      try {
+        const res = await api.startDuplicates(nodeId, min)
+        if (!res.ok) window.alert(await res.text())
+      } catch (e) {
+        window.alert(String(e))
+      }
     },
     [nodeId],
   )
@@ -184,7 +193,7 @@ export default function App() {
   // A link to a node that is not part of this scan falls back to the root
   // instead of leaving the view stuck.
   useEffect(() => {
-    if (node.error?.startsWith('404') && nodeId !== 0) setNodeId(0)
+    if (node.error instanceof HttpError && node.error.status === 404 && nodeId !== 0) setNodeId(0)
   }, [node.error, nodeId])
 
   const onDividerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -519,6 +528,7 @@ export default function App() {
             {tab === 'duplicates' && dupes && (
               <Duplicates
                 progress={dupes}
+                scanReady={!scanning}
                 groups={dupeResults.data?.groups ?? []}
                 truncated={dupeResults.data?.truncated ?? false}
                 totalGroups={dupeResults.data?.total_groups ?? 0}
@@ -557,7 +567,6 @@ export default function App() {
                 onOpen={open}
                 selected={selected}
                 onMenu={openMenu}
-                filter={filtering ? filter : undefined}
                 heat={heat}
               />
               {heat && (
