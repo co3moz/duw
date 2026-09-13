@@ -445,6 +445,38 @@ button {
   background: var(--line);
 }
 
+.list-head {
+  padding: 0 6px;
+}
+.row-head {
+  padding: 2px 8px;
+  color: var(--fg-faint);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.row-head:hover {
+  background: none;
+}
+.head-sort {
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  white-space: nowrap;
+}
+.head-sort:hover {
+  color: var(--fg);
+}
+.head-meta {
+  display: flex;
+  gap: 10px;
+}
+.head-size {
+  text-align: right;
+}
+
 .row-icon {
   text-align: center;
   color: var(--fg-faint);

@@ -1,5 +1,6 @@
 export type Kind = 'dir' | 'file' | 'link' | 'other'
 export type Metric = 'size' | 'alloc'
+export type SortKey = 'size' | 'name' | 'mtime' | 'count'
 
 export interface Stats {
   files: number
@@ -205,8 +206,11 @@ async function get<T>(url: string, signal?: AbortSignal): Promise<T> {
 export const api = {
   state: (signal?: AbortSignal) => get<FullState>('/api/state', signal),
 
-  node: (id: number, metric: Metric, limit: number, signal?: AbortSignal) =>
-    get<NodeView>(`/api/node/${id}?metric=${metric}&limit=${limit}`, signal),
+  node: (id: number, metric: Metric, limit: number, sort: SortKey, asc: boolean, signal?: AbortSignal) =>
+    get<NodeView>(
+      `/api/node/${id}?metric=${metric}&limit=${limit}&sort=${sort}&asc=${asc}`,
+      signal,
+    ),
 
   tree: (id: number, metric: Metric, depth: number, limit: number, signal?: AbortSignal) =>
     get<{ root: SubtreeNode; version: number; truncated: boolean }>(

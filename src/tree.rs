@@ -48,6 +48,16 @@ pub struct Node {
     pub children: Vec<u32>,
 }
 
+/// How the child list is ordered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SortKey {
+    #[default]
+    Size,
+    Name,
+    Mtime,
+    Count,
+}
+
 /// A freshly discovered entry, handed over by the scanner.
 pub struct NewEntry {
     pub name: String,
@@ -356,9 +366,17 @@ impl Tree {
         }
     }
 
-    /// Direct children of `id`, largest first, capped at `limit`. Anything past
-    /// the cap is folded into `other` so the UI never has to render 50k rows.
-    pub fn children_view(&self, id: u32, by_alloc: bool, limit: usize) -> Option<ChildrenView> {
+    /// Direct children of `id`, sorted as requested, capped at `limit`.
+    /// Anything past the cap is folded into `other` so the UI never has to
+    /// render 50k rows.
+    pub fn children_view(
+        &self,
+        id: u32,
+        by_alloc: bool,
+        sort: SortKey,
+        ascending: bool,
+        limit: usize,
+    ) -> Option<ChildrenView> {
         let node = self.get(id)?;
         let mut ids: Vec<u32> = node.children.clone();
         let key = |t: &Tree, i: u32| {
@@ -370,7 +388,19 @@ impl Tree {
             }
         };
         ids.sort_unstable_by(|a, b| {
-            key(self, *b).cmp(&key(self, *a)).then_with(|| {
+            let ord = match sort {
+                SortKey::Size => key(self, *a).cmp(&key(self, *b)),
+                SortKey::Name => self.nodes[*a as usize]
+                    .name
+                    .cmp(&self.nodes[*b as usize].name),
+                SortKey::Mtime => self.nodes[*a as usize]
+                    .mtime
+                    .cmp(&self.nodes[*b as usize].mtime),
+                SortKey::Count => (self.nodes[*a as usize].files + self.nodes[*a as usize].dirs)
+                    .cmp(&(self.nodes[*b as usize].files + self.nodes[*b as usize].dirs)),
+            };
+            let ord = if ascending { ord } else { ord.reverse() };
+            ord.then_with(|| {
                 self.nodes[*a as usize]
                     .name
                     .cmp(&self.nodes[*b as usize].name)
@@ -856,7 +886,9 @@ mod tests {
             .map(|i| entry(&format!("f{i}"), Kind::File, (i + 1) * 10))
             .collect();
         t.add_children(ROOT, items);
-        let v = t.children_view(ROOT, false, 3).unwrap();
+        let v = t
+            .children_view(ROOT, false, SortKey::Size, false, 3)
+            .unwrap();
         assert_eq!(v.children.len(), 3);
         assert_eq!(v.children[0].size, 100);
         assert_eq!(v.other.count, 7);
@@ -875,7 +907,9 @@ mod tests {
         assert_eq!(dirs.len(), 1);
         assert_eq!(t.nodes[dirs[0] as usize].name.as_ref(), "local");
 
-        let view = t.children_view(ROOT, false, 10).unwrap();
+        let view = t
+            .children_view(ROOT, false, SortKey::Size, false, 10)
+            .unwrap();
         let cloud = view.children.iter().find(|c| c.name == "iCloud").unwrap();
         assert!(cloud.cloud);
         // Marked read so the UI does not show it as still being scanned.

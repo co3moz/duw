@@ -51,6 +51,7 @@ cargo install duw
   recoverable.
 - **Treemap**: three levels deep. Click a rectangle to go into it.
 
+Click a column header to sort by name, modified date, file count or size.
 Press `Backspace` or `Escape` to go up one level. Nothing is sent over the
 internet. The server listens on `127.0.0.1` only, and it stops when you press
 `Ctrl+C`.

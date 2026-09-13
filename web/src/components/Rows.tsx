@@ -1,4 +1,12 @@
-import type { Entry, ExtStat, LargeFile, Metric, Rollup, SearchHit } from '../api'
+import type {
+  Entry,
+  ExtStat,
+  LargeFile,
+  Metric,
+  Rollup,
+  SearchHit,
+  SortKey,
+} from '../api'
 import {
   CATEGORY_COLOR,
   CATEGORY_LABEL,
@@ -41,6 +49,43 @@ function Bar({ pct, color }: { pct: number; color: string }) {
   return (
     <div className="bar" title={`${pct.toFixed(1)}%`}>
       <div className="bar-fill" style={{ width: `${Math.min(100, pct)}%`, background: color }} />
+    </div>
+  )
+}
+
+/** Clickable column headers for the folder list. */
+export function ListHeader({
+  sort,
+  asc,
+  onSort,
+}: {
+  sort: SortKey
+  asc: boolean
+  onSort: (key: SortKey) => void
+}) {
+  const mark = (key: SortKey) => (sort === key ? (asc ? ' ↑' : ' ↓') : '')
+  return (
+    <div className="list-head">
+      <div className="row row-head">
+        <span />
+        <button className="head-sort" onClick={() => onSort('name')}>
+          name{mark('name')}
+        </button>
+        <span className="head-meta">
+          <button className="head-sort" onClick={() => onSort('mtime')}>
+            modified{mark('mtime')}
+          </button>
+          <button className="head-sort" onClick={() => onSort('count')}>
+            files{mark('count')}
+          </button>
+        </span>
+        <span />
+        <span />
+        <button className="head-sort head-size" onClick={() => onSort('size')}>
+          size{mark('size')}
+        </button>
+        <span />
+      </div>
     </div>
   )
 }

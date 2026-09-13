@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, filterActive, type FilterSpec, type Metric } from './api'
+import { api, filterActive, type FilterSpec, type Metric, type SortKey } from './api'
 import { bytes, count, duration, parseSize } from './format'
 import { useElementSize } from './useElementSize'
 import { useDebounced, useLive, useResource, useThrottled } from './useLive'
 import { Treemap } from './components/Treemap'
-import { FolderRows, LargestRows, SearchRows, TypeRows } from './components/Rows'
+import { FolderRows, LargestRows, ListHeader, SearchRows, TypeRows } from './components/Rows'
 import { Duplicates } from './components/Duplicates'
 import { Snapshots } from './components/Snapshots'
 
@@ -40,6 +40,11 @@ export default function App() {
   const dragging = useRef(false)
   const [menu, setMenu] = useState<{ id: number; name: string; x: number; y: number } | null>(null)
   const [filters, setFilters] = useState({ q: '', ext: '', min: '', max: '', age: '' })
+  const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({ key: 'size', asc: false })
+
+  const onSort = useCallback((key: SortKey) => {
+    setSort((cur) => (cur.key === key ? { key, asc: !cur.asc } : { key, asc: key === 'name' }))
+  }, [])
 
   const dragTo = useCallback((clientX: number, parent: HTMLElement) => {
     const rect = parent.getBoundingClientRect()
@@ -82,8 +87,8 @@ export default function App() {
   const filtering = filterActive(filter)
 
   const node = useResource(
-    (s) => api.node(nodeId, metric, LIST_LIMIT, s),
-    [nodeId, metric, version],
+    (s) => api.node(nodeId, metric, LIST_LIMIT, sort.key, sort.asc, s),
+    [nodeId, metric, version, sort],
   )
   const map = useResource(
     (s) => api.tree(nodeId, metric, MAP_DEPTH, MAP_PER_LEVEL, s),
@@ -401,6 +406,9 @@ export default function App() {
               snapshots
             </button>
           </div>
+          {tab === 'folders' && !filtering && (
+            <ListHeader sort={sort.key} asc={sort.asc} onSort={onSort} />
+          )}
           <div className="panel-body">
             {tab === 'folders' &&
               (filtering ? (

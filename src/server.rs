@@ -23,7 +23,8 @@ use crate::fsext;
 use crate::scan::Scanner;
 use crate::snapshots;
 use crate::tree::{
-    Crumb, Entry, ExtStat, LargeFile, Rollup, SearchFilter, SearchHit, Stats, SubtreeNode, ROOT,
+    Crumb, Entry, ExtStat, LargeFile, Rollup, SearchFilter, SearchHit, SortKey, Stats, SubtreeNode,
+    ROOT,
 };
 
 const DEFAULT_LIMIT: usize = 400;
@@ -165,7 +166,33 @@ async fn events(
 struct ViewQuery {
     #[serde(default)]
     metric: Metric,
+    #[serde(default)]
+    sort: Sort,
+    /// Ascending order; the default is biggest/newest first.
+    #[serde(default)]
+    asc: bool,
     limit: Option<usize>,
+}
+
+#[derive(Deserialize, Default, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum Sort {
+    #[default]
+    Size,
+    Name,
+    Mtime,
+    Count,
+}
+
+impl Sort {
+    fn key(self) -> SortKey {
+        match self {
+            Sort::Size => SortKey::Size,
+            Sort::Name => SortKey::Name,
+            Sort::Mtime => SortKey::Mtime,
+            Sort::Count => SortKey::Count,
+        }
+    }
 }
 
 #[derive(Deserialize, Default, Clone, Copy, PartialEq)]
@@ -213,7 +240,13 @@ async fn node(
     let Some(n) = t.get(id) else {
         return (StatusCode::NOT_FOUND, "no such node").into_response();
     };
-    let view = t.children_view(id, q.metric.by_alloc(), clamp_limit(q.limit));
+    let view = t.children_view(
+        id,
+        q.metric.by_alloc(),
+        q.sort.key(),
+        q.asc,
+        clamp_limit(q.limit),
+    );
     let Some(view) = view else {
         return (StatusCode::NOT_FOUND, "no such node").into_response();
     };
