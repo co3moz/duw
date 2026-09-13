@@ -59,6 +59,12 @@ fn run() -> Result<(), String> {
 
     let scanner = Scanner::new(opts).map_err(|e| format!("cannot scan {}: {e}", root.display()))?;
 
+    // Script and CI modes: scan synchronously, print, and never bind a port.
+    if args.json || args.top.is_some() {
+        scanner.run();
+        return print_report(&scanner, &root, &args);
+    }
+
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let dupes = Dupes::new(Arc::clone(&scanner.tree), root.clone());
 
@@ -180,4 +186,40 @@ async fn shutdown(streams: tokio::sync::watch::Sender<bool>) {
         eprintln!("duw: a connection would not close, exiting anyway");
         std::process::exit(0);
     });
+}
+
+#[derive(serde::Serialize)]
+struct JsonReport {
+    root: String,
+    elapsed_ms: u64,
+    stats: tree::Stats,
+    errors: Vec<tree::ScanError>,
+    largest: Vec<tree::LargeFile>,
+    types: Vec<tree::ExtStat>,
+}
+
+/// Prints the finished scan for scripts. `--json` emits the whole report,
+/// otherwise one `size<TAB>path` line per entry.
+fn print_report(scanner: &Scanner, root: &std::path::Path, args: &Args) -> Result<(), String> {
+    let limit = args.top.unwrap_or(100).clamp(1, 1_000_000);
+    let t = scanner.tree.read().unwrap();
+    let largest = t.largest_files(tree::ROOT, false, limit);
+
+    if args.json {
+        let report = JsonReport {
+            root: root.display().to_string(),
+            elapsed_ms: scanner.elapsed_ms(),
+            stats: t.stats.clone(),
+            errors: t.errors.clone(),
+            largest,
+            types: t.by_extension(tree::ROOT),
+        };
+        let text = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+        println!("{text}");
+    } else {
+        for f in largest {
+            println!("{}\t{}", f.size, f.path);
+        }
+    }
+    Ok(())
 }

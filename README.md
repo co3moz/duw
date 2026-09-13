@@ -78,11 +78,17 @@ duw [OPTIONS] [PATH]
   -j, --threads <N>        Scanning threads [default: number of cores]
       --duplicates         Look for duplicate files once the scan finishes
       --duplicates-min <S> Smallest file to consider, e.g. 512K, 10M [default: 512K]
+      --json               Print a JSON summary to stdout instead of serving
+                           the UI
+      --top <N>            Print the N largest files to stdout instead of
+                           serving the UI
 ```
 
 ```bash
 duw --exclude '*/node_modules' --exclude '.git' ~/src
 duw -d 2 --no-open -p 8080 /
+duw --json /var/log | jq '.largest[0]'
+duw --top 20 ~/Downloads
 ```
 
 ## Building from source

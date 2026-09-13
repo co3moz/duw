@@ -63,6 +63,14 @@ pub struct Args {
     #[arg(long)]
     pub duplicates: bool,
 
+    /// Print a JSON summary to stdout instead of serving the UI.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Print the N largest files to stdout instead of serving the UI.
+    #[arg(long, value_name = "N")]
+    pub top: Option<usize>,
+
     /// Smallest file the duplicate scanner considers, e.g. 512K, 10M, 1G.
     #[arg(long, value_name = "SIZE", default_value = "512K", value_parser = parse_size)]
     pub duplicates_min: u64,
