@@ -48,6 +48,26 @@ export function mtime(unixSeconds: number): string {
   return new Date(unixSeconds * 1000).toLocaleDateString()
 }
 
+/** Age buckets used by the heatmap view, oldest last. */
+export const AGE_STOPS = [
+  { days: 30, label: '< 1 month', color: '#5cc8a0' },
+  { days: 180, label: '< 6 months', color: '#a8c85c' },
+  { days: 365, label: '< 1 year', color: '#e0c052' },
+  { days: 730, label: '< 2 years', color: '#e09a52' },
+  { days: 1095, label: '< 3 years', color: '#e07852' },
+  { days: Number.POSITIVE_INFINITY, label: 'older', color: '#e06868' },
+]
+
+/** Green for freshly touched files, red for ones that have been sitting. */
+export function ageColor(unixSeconds: number): string {
+  if (!unixSeconds) return 'var(--fg-faint)'
+  const days = (Date.now() / 1000 - unixSeconds) / 86_400
+  for (const stop of AGE_STOPS) {
+    if (days < stop.days) return stop.color
+  }
+  return AGE_STOPS[AGE_STOPS.length - 1].color
+}
+
 export type Category =
   | 'folder'
   | 'video'

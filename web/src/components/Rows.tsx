@@ -10,6 +10,7 @@ import type {
 import {
   CATEGORY_COLOR,
   CATEGORY_LABEL,
+  ageColor,
   bytes,
   categoryOf,
   count,
@@ -100,6 +101,7 @@ export function FolderRows({
   onOpen,
   onUp,
   onMenu,
+  age,
 }: {
   entries: Entry[]
   other: Rollup
@@ -111,6 +113,8 @@ export function FolderRows({
   /// Absent at the scan root, where there is nowhere to go up to.
   onUp?: () => void
   onMenu?: MenuHandler
+  /** Colour bars by age instead of file type. */
+  age?: boolean
 }) {
   return (
     <ul className="rows">
@@ -159,7 +163,7 @@ export function FolderRows({
             <span className="row-meta">
               {e.kind === 'dir' ? `${count(e.files)} files` : mtime(e.mtime)}
             </span>
-            <Bar pct={percent(v, total)} color={CATEGORY_COLOR[cat]} />
+            <Bar pct={percent(v, total)} color={age ? ageColor(e.mtime) : CATEGORY_COLOR[cat]} />
             <span className="row-pct">{percent(v, total).toFixed(1)}%</span>
             <span className="row-size">{bytes(v)}</span>
             {onMenu && <MenuButton id={e.id} name={e.name} onMenu={onMenu} />}
@@ -253,11 +257,13 @@ export function LargestRows({
   metric,
   total,
   onMenu,
+  age,
 }: {
   files: LargeFile[]
   metric: Metric
   total: number
   onMenu?: MenuHandler
+  age?: boolean
 }) {
   if (!files.length) return <p className="empty">No files scanned here yet.</p>
   return (
@@ -281,7 +287,7 @@ export function LargestRows({
               {dir && <span className="path-dir">{dir}</span>}
             </span>
             <span className="row-meta">{mtime(f.mtime)}</span>
-            <Bar pct={percent(v, total)} color={CATEGORY_COLOR[cat]} />
+            <Bar pct={percent(v, total)} color={age ? ageColor(f.mtime) : CATEGORY_COLOR[cat]} />
             <span className="row-pct">{percent(v, total).toFixed(1)}%</span>
             <span className="row-size">{bytes(v)}</span>
             {onMenu && <MenuButton id={f.id} name={name} onMenu={onMenu} />}
@@ -299,6 +305,7 @@ export function SearchRows({
   total,
   onOpen,
   onMenu,
+  age,
 }: {
   hits: SearchHit[]
   metric: Metric
@@ -306,6 +313,7 @@ export function SearchRows({
   /** Double-clicking a file opens its folder; a directory opens itself. */
   onOpen: (hit: SearchHit) => void
   onMenu?: MenuHandler
+  age?: boolean
 }) {
   if (!hits.length) return <p className="empty">No matches.</p>
   return (
@@ -325,7 +333,7 @@ export function SearchRows({
               {dir && <span className="path-dir">{dir}</span>}
             </span>
             <span className="row-meta">{mtime(h.mtime)}</span>
-            <Bar pct={percent(v, total)} color={CATEGORY_COLOR[cat]} />
+            <Bar pct={percent(v, total)} color={age ? ageColor(h.mtime) : CATEGORY_COLOR[cat]} />
             <span className="row-pct">{percent(v, total).toFixed(1)}%</span>
             <span className="row-size">{bytes(v)}</span>
             {onMenu && <MenuButton id={h.id} name={h.name} onMenu={onMenu} />}

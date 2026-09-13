@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, filterActive, type FilterSpec, type Metric, type SortKey } from './api'
-import { bytes, count, duration, parseSize } from './format'
+import { bytes, count, duration, parseSize, AGE_STOPS } from './format'
 import { useElementSize } from './useElementSize'
 import { useDebounced, useLive, useResource, useThrottled } from './useLive'
 import { Treemap } from './components/Treemap'
@@ -41,6 +41,7 @@ export default function App() {
   const [menu, setMenu] = useState<{ id: number; name: string; x: number; y: number } | null>(null)
   const [filters, setFilters] = useState({ q: '', ext: '', min: '', max: '', age: '' })
   const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({ key: 'size', asc: false })
+  const [heat, setHeat] = useState(false)
 
   const onSort = useCallback((key: SortKey) => {
     setSort((cur) => (cur.key === key ? { key, asc: !cur.asc } : { key, asc: key === 'name' }))
@@ -310,6 +311,15 @@ export default function App() {
                 on&nbsp;disk{state.platform.approximate_alloc ? '*' : ''}
               </button>
             </div>
+            <div className="toggle" role="group" aria-label="View mode">
+              <button
+                className={heat ? 'on' : ''}
+                onClick={() => setHeat((h) => !h)}
+                title="Colour by how long since each entry was modified"
+              >
+                age map
+              </button>
+            </div>
             {scanning && (
               <button className="stop" onClick={() => api.cancel()}>
                 stop scan
@@ -425,6 +435,7 @@ export default function App() {
                       total={total}
                       onOpen={(hit) => open(hit.kind === 'dir' ? hit.id : hit.parent)}
                       onMenu={openMenu}
+                      age={heat}
                     />
                   </>
                 ) : (
@@ -441,6 +452,7 @@ export default function App() {
                   onOpen={open}
                   onUp={view.breadcrumb.length > 1 ? up : undefined}
                   onMenu={openMenu}
+                  age={heat}
                 />
               ))}
             {tab === 'types' &&
@@ -456,6 +468,7 @@ export default function App() {
                   metric={metric}
                   total={total}
                   onMenu={openMenu}
+                  age={heat}
                 />
               ) : (
                 <p className="empty">aggregating…</p>
@@ -494,14 +507,27 @@ export default function App() {
 
         <section className="panel panel-map">
           {map.data ? (
-            <Treemap
-              root={map.data.root}
-              metric={metric}
-              onOpen={open}
-              selected={selected}
-              onMenu={openMenu}
-              filter={filtering ? filter : undefined}
-            />
+            <>
+              <Treemap
+                root={map.data.root}
+                metric={metric}
+                onOpen={open}
+                selected={selected}
+                onMenu={openMenu}
+                filter={filtering ? filter : undefined}
+                heat={heat}
+              />
+              {heat && (
+                <div className="age-legend">
+                  {AGE_STOPS.map((s) => (
+                    <span key={s.label}>
+                      <i style={{ background: s.color }} />
+                      {s.label}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </>
           ) : (
             <div className="empty">building map…</div>
           )}

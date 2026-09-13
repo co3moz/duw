@@ -729,6 +729,27 @@ button {
   inset: 0;
 }
 
+.age-legend {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 0 12px 10px;
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+.age-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.age-legend i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
 .cell rect {
   stroke: var(--bg);
   stroke-width: 0.5;

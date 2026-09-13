@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from 'react'
 import { hierarchy, treemap, treemapSquarify, type HierarchyRectangularNode } from 'd3-hierarchy'
 import { filterActive, type FilterSpec, type Metric, type SubtreeNode } from '../api'
-import { CATEGORY_COLOR, bytes, categoryOf, percent } from '../format'
+import { CATEGORY_COLOR, ageColor, bytes, categoryOf, percent } from '../format'
 import { useElementSize } from '../useElementSize'
 import type { MenuHandler } from './Rows'
 
@@ -11,6 +11,7 @@ interface Cell {
   name: string
   kind: SubtreeNode['kind'] | 'rest'
   value: number
+  mtime: number
   children?: Cell[]
 }
 
@@ -25,6 +26,7 @@ export function Treemap({
   selected,
   onMenu,
   filter,
+  heat,
 }: {
   root: SubtreeNode
   metric: Metric
@@ -32,6 +34,7 @@ export function Treemap({
   selected: number | null
   onMenu?: MenuHandler
   filter?: FilterSpec
+  heat?: boolean
 }) {
   const [box, ref] = useElementSize<HTMLDivElement>()
   const [hover, setHover] = useState<HierarchyRectangularNode<Cell> | null>(null)
@@ -76,7 +79,7 @@ export function Treemap({
             const w = d.x1 - d.x0
             const h = d.y1 - d.y0
             const isDir = !!d.data.children?.length
-            const fill = isDir ? 'var(--map-dir)' : colorOf(d.data)
+            const fill = fillOf(d.data, isDir, !!heat)
             const label = w > MIN_LABEL_W && h > MIN_LABEL_H
             return (
               <g
@@ -143,6 +146,12 @@ function colorOf(cell: Cell): string {
   return CATEGORY_COLOR[categoryOf(ext)]
 }
 
+function fillOf(cell: Cell, isDir: boolean, heat: boolean): string {
+  if (cell.kind === 'rest') return 'var(--map-rest)'
+  if (heat) return ageColor(cell.mtime)
+  return isDir ? 'var(--map-dir)' : colorOf(cell)
+}
+
 /**
  * The API returns only the biggest children per level, so a directory's own
  * total is usually larger than the sum of what came back. The difference
@@ -152,15 +161,21 @@ function toCells(node: SubtreeNode, metric: Metric): Cell {
   const value = metric === 'alloc' ? node.alloc : node.size
   const kids = node.children ?? []
   if (!kids.length) {
-    return { id: node.id, name: node.name, kind: node.kind, value }
+    return { id: node.id, name: node.name, kind: node.kind, value, mtime: node.mtime }
   }
   const children = kids.map((k) => toCells(k, metric))
   const covered = children.reduce((a, c) => a + c.value, 0)
   const rest = value - covered
   if (rest > 0 && rest > value * 0.005) {
-    children.push({ id: -1, name: `… ${bytes(rest)} more`, kind: 'rest', value: rest })
+    children.push({
+      id: -1,
+      name: `… ${bytes(rest)} more`,
+      kind: 'rest',
+      value: rest,
+      mtime: 0,
+    })
   }
-  return { id: node.id, name: node.name, kind: node.kind, value, children }
+  return { id: node.id, name: node.name, kind: node.kind, value, mtime: node.mtime, children }
 }
 
 /**

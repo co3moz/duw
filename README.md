@@ -46,6 +46,8 @@ cargo install duw
   see what grew or shrank.
 - **Filters**: search by name, extension, size and age. Matching covers the
   whole folder in view and the treemap narrows with it.
+- **Age map**: colour by how long since each entry was modified, from green
+  (touched recently) to red (untouched for years).
 - **Actions**: right-click an entry (or use the ⋯ button) to reveal it in the
   file manager, copy its path, or move it to the trash. Deleting is always
   recoverable.
