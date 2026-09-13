@@ -564,14 +564,13 @@ async fn save_snapshot(
     if !snapshots::valid_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid snapshot name").into_response();
     }
-    let snapshot = snapshots::Snapshot {
-        name,
-        root: state.root.clone(),
-        created: snapshots::now(),
-        entries: state.scanner.tree.read().unwrap().snapshot_entries(),
+    let result = {
+        let tree = state.scanner.tree.read().unwrap();
+        let mut files = tree.sorted_files();
+        snapshots::save(&name, &state.root, snapshots::now(), &mut files)
     };
-    match snapshots::save(&snapshot) {
-        Ok(file_bytes) => Json(snapshots::SnapshotMeta::of(&snapshot, file_bytes)).into_response(),
+    match result {
+        Ok(meta) => Json(meta).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("cannot save snapshot: {e}"),
@@ -617,8 +616,8 @@ async fn snapshot_diff(
     Path(name): Path<String>,
     Query(q): Query<DiffQuery>,
 ) -> impl IntoResponse {
-    let from = match snapshots::load(&name) {
-        Ok(s) => s,
+    let from = match snapshots::meta(&name) {
+        Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return (StatusCode::NOT_FOUND, "no such snapshot").into_response()
         }
@@ -630,15 +629,25 @@ async fn snapshot_diff(
                 .into_response()
         }
     };
-    let current = state.scanner.tree.read().unwrap().snapshot_entries();
     let limit = q.limit.unwrap_or(200).clamp(1, MAX_LIMIT);
-    Json(DiffResponse {
-        from: snapshots::SnapshotMeta::of(&from, snapshots::file_size(&name).unwrap_or(0)),
-        to_root: state.root.clone(),
-        to_created: snapshots::now(),
-        diff: snapshots::diff(&from.entries, &current, limit),
-    })
-    .into_response()
+    let result = {
+        let tree = state.scanner.tree.read().unwrap();
+        snapshots::diff(&name, &tree, limit)
+    };
+    match result {
+        Ok(diff) => Json(DiffResponse {
+            from,
+            to_root: state.root.clone(),
+            to_created: snapshots::now(),
+            diff,
+        })
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot compare snapshot: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Deserialize)]

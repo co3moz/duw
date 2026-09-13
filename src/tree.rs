@@ -5,6 +5,7 @@
 //! partially scanned tree is always coherent - that is what makes streaming to
 //! the browser possible.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -581,26 +582,9 @@ impl Tree {
         hits
     }
 
-    /// Every non-directory entry with its path relative to the scan root.
-    /// Directory totals are sums of these, so a snapshot only needs the leaves.
-    pub fn snapshot_entries(&self) -> Vec<SnapEntry> {
-        let mut out = Vec::new();
-        let mut stack = vec![ROOT];
-        while let Some(cur) = stack.pop() {
-            let n = &self.nodes[cur as usize];
-            if n.kind == Kind::Dir {
-                stack.extend(n.children.iter().copied());
-            } else {
-                out.push(SnapEntry {
-                    path: self.rel_path(cur),
-                    kind: n.kind,
-                    size: n.self_size,
-                    alloc: n.self_alloc,
-                    mtime: n.mtime,
-                });
-            }
-        }
-        out
+    /// Files in lexicographic path order, for saving and diffing snapshots.
+    pub fn sorted_files(&self) -> SortedFiles<'_> {
+        SortedFiles::new(self)
     }
 
     /// Files under `id` worth considering as duplicate candidates: real files
@@ -798,14 +782,174 @@ pub struct SearchHit {
     pub ext: Option<String>,
 }
 
-/// One leaf of a saved scan, used to diff two points in time.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct SnapEntry {
-    pub path: String,
+/// One file entry as seen by saving and diffing: the path relative to the scan
+/// root plus the metadata a snapshot keeps.
+#[derive(Clone, Copy)]
+pub struct FileInfo {
     pub kind: Kind,
     pub size: u64,
     pub alloc: u64,
     pub mtime: i64,
+}
+
+/// A stream of file entries in path order. The live tree and a saved snapshot
+/// both implement it so a diff can merge the two without building maps.
+pub trait FileSource {
+    /// Loads the next entry; false once the source is exhausted.
+    fn advance(&mut self) -> std::io::Result<bool>;
+    /// Path of the current entry (empty until the first `advance`).
+    fn path(&self) -> &str;
+    fn info(&self) -> FileInfo;
+}
+
+struct Frame {
+    /// Children of the directory, sorted by name.
+    children: Vec<u32>,
+    next: usize,
+    /// Path length to restore when this frame is popped.
+    restore: usize,
+}
+
+/// Orders two children of the same directory the way their full paths sort
+/// byte-wise. A directory is compared as if its name ended with `/`, since
+/// that is where its children's paths continue: `a.txt` must come before the
+/// contents of `a`, because `.` sorts before `/`.
+fn cmp_children(tree: &Tree, a: u32, b: u32) -> Ordering {
+    let na = &tree.nodes[a as usize];
+    let nb = &tree.nodes[b as usize];
+    let a_dir = na.kind == Kind::Dir;
+    let b_dir = nb.kind == Kind::Dir;
+    if a_dir == b_dir {
+        return na.name.cmp(&nb.name);
+    }
+    let ab = na.name.as_bytes();
+    let bb = nb.name.as_bytes();
+    if ab.len() == bb.len() {
+        // Same name with different kinds cannot exist in one directory, but a
+        // directory key is the longer one either way.
+        return if a_dir {
+            Ordering::Greater
+        } else {
+            Ordering::Less
+        };
+    }
+    let min = ab.len().min(bb.len());
+    match ab[..min].cmp(&bb[..min]) {
+        Ordering::Equal => {}
+        ord => return ord,
+    }
+    // One name is a prefix of the other; the directory side continues with a
+    // separator that the file side does not have.
+    if ab.len() < bb.len() {
+        if a_dir {
+            b'/'.cmp(&bb[min])
+        } else {
+            Ordering::Less
+        }
+    } else if b_dir {
+        ab[min].cmp(&b'/')
+    } else {
+        Ordering::Greater
+    }
+}
+
+/// Streams the tree's files in byte-lexicographic path order: a depth-first
+/// walk where each directory's children are ordered with the implicit `/` that
+/// separates them from their contents. Saving and diffing share this order.
+pub struct SortedFiles<'a> {
+    tree: &'a Tree,
+    stack: Vec<Frame>,
+    path: String,
+    /// Length the path is truncated to before the next entry, undoing the
+    /// previous file name.
+    file_mark: Option<usize>,
+    info: FileInfo,
+}
+
+impl<'a> SortedFiles<'a> {
+    pub fn new(tree: &'a Tree) -> Self {
+        let root = &tree.nodes[ROOT as usize];
+        let mut children = root.children.clone();
+        children.sort_unstable_by(|a, b| cmp_children(tree, *a, *b));
+        SortedFiles {
+            tree,
+            stack: vec![Frame {
+                children,
+                next: 0,
+                restore: 0,
+            }],
+            path: String::new(),
+            file_mark: None,
+            info: FileInfo {
+                kind: Kind::File,
+                size: 0,
+                alloc: 0,
+                mtime: 0,
+            },
+        }
+    }
+
+    fn next_file(&mut self) -> bool {
+        if let Some(mark) = self.file_mark.take() {
+            self.path.truncate(mark);
+        }
+        let tree = self.tree;
+        loop {
+            let Some(frame) = self.stack.last_mut() else {
+                return false;
+            };
+            if frame.next >= frame.children.len() {
+                let frame = self.stack.pop().unwrap();
+                self.path.truncate(frame.restore);
+                continue;
+            }
+            let id = frame.children[frame.next];
+            frame.next += 1;
+            let node = &tree.nodes[id as usize];
+            if node.kind == Kind::Dir {
+                let restore = self.path.len();
+                if !self.path.is_empty() {
+                    self.path.push('/');
+                }
+                self.path.push_str(&node.name);
+                let mut children = node.children.clone();
+                children.sort_unstable_by(|a, b| cmp_children(tree, *a, *b));
+                self.stack.push(Frame {
+                    children,
+                    next: 0,
+                    restore,
+                });
+            } else {
+                let mark = self.path.len();
+                if !self.path.is_empty() {
+                    self.path.push('/');
+                }
+                self.path.push_str(&node.name);
+                self.file_mark = Some(mark);
+                self.info = FileInfo {
+                    kind: node.kind,
+                    size: node.self_size,
+                    alloc: node.self_alloc,
+                    mtime: node.mtime,
+                };
+                return true;
+            }
+        }
+    }
+}
+
+impl FileSource for SortedFiles<'_> {
+    fn advance(&mut self) -> std::io::Result<bool> {
+        Ok(self.next_file())
+    }
+
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    fn info(&self) -> FileInfo {
+        self.info
+    }
 }
 
 /// ASCII case-insensitive `contains`, avoiding an allocation per entry.
@@ -1077,6 +1221,33 @@ mod tests {
             max_mtime: None,
         };
         assert!(t.search(ROOT, &f, false, 10, 100).is_empty());
+    }
+
+    #[test]
+    fn sorted_files_follow_byte_order() {
+        let mut t = Tree::new("root".into(), 0, 0, 0);
+        let dirs = t.add_children(
+            ROOT,
+            vec![
+                entry("a", Kind::Dir, 0),
+                entry("a.txt", Kind::File, 10),
+                entry("a0", Kind::File, 20),
+            ],
+        );
+        let inner = t.add_children(
+            dirs[0],
+            vec![entry("b", Kind::Dir, 0), entry("b.txt", Kind::File, 30)],
+        );
+        t.add_children(inner[0], vec![entry("c.txt", Kind::File, 40)]);
+
+        let mut files = t.sorted_files();
+        let mut paths = Vec::new();
+        while files.advance().unwrap() {
+            paths.push(files.path().to_string());
+        }
+        // `.` sorts before `/`, so a file next to a directory comes first; the
+        // directory's own contents continue after the separator.
+        assert_eq!(paths, vec!["a.txt", "a/b.txt", "a/b/c.txt", "a0"]);
     }
 
     #[test]
