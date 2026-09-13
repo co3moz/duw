@@ -571,7 +571,7 @@ async fn save_snapshot(
         entries: state.scanner.tree.read().unwrap().snapshot_entries(),
     };
     match snapshots::save(&snapshot) {
-        Ok(()) => Json(snapshots::SnapshotMeta::of(&snapshot)).into_response(),
+        Ok(file_bytes) => Json(snapshots::SnapshotMeta::of(&snapshot, file_bytes)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("cannot save snapshot: {e}"),
@@ -633,7 +633,7 @@ async fn snapshot_diff(
     let current = state.scanner.tree.read().unwrap().snapshot_entries();
     let limit = q.limit.unwrap_or(200).clamp(1, MAX_LIMIT);
     Json(DiffResponse {
-        from: snapshots::SnapshotMeta::of(&from),
+        from: snapshots::SnapshotMeta::of(&from, snapshots::file_size(&name).unwrap_or(0)),
         to_root: state.root.clone(),
         to_created: snapshots::now(),
         diff: snapshots::diff(&from.entries, &current, limit),

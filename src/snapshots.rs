@@ -27,17 +27,21 @@ pub struct SnapshotMeta {
     pub root: String,
     pub created: u64,
     pub entries: u64,
+    /// Sum of the scanned file sizes the snapshot describes.
     pub bytes: u64,
+    /// Size of the snapshot file itself on disk.
+    pub file_bytes: u64,
 }
 
 impl SnapshotMeta {
-    pub fn of(snapshot: &Snapshot) -> Self {
+    pub fn of(snapshot: &Snapshot, file_bytes: u64) -> Self {
         SnapshotMeta {
             name: snapshot.name.clone(),
             root: snapshot.root.clone(),
             created: snapshot.created,
             entries: snapshot.entries.len() as u64,
             bytes: snapshot.entries.iter().map(|e| e.size).sum(),
+            file_bytes,
         }
     }
 }
@@ -113,16 +117,23 @@ fn path_for(name: &str) -> std::io::Result<PathBuf> {
     Ok(dir()?.join(format!("{name}.json")))
 }
 
-pub fn save(snapshot: &Snapshot) -> std::io::Result<()> {
+/// Writes the snapshot and returns the size of the file it produced.
+pub fn save(snapshot: &Snapshot) -> std::io::Result<u64> {
     let path = path_for(&snapshot.name)?;
     let data = serde_json::to_vec(snapshot).map_err(std::io::Error::other)?;
-    std::fs::write(path, data)
+    std::fs::write(path, &data)?;
+    Ok(data.len() as u64)
 }
 
 pub fn load(name: &str) -> std::io::Result<Snapshot> {
     let path = path_for(name)?;
     let data = std::fs::read(path)?;
     serde_json::from_slice(&data).map_err(std::io::Error::other)
+}
+
+/// On-disk size of a saved snapshot.
+pub fn file_size(name: &str) -> std::io::Result<u64> {
+    Ok(std::fs::metadata(path_for(name)?)?.len())
 }
 
 pub fn delete(name: &str) -> std::io::Result<()> {
@@ -144,7 +155,7 @@ pub fn list() -> std::io::Result<Vec<SnapshotMeta>> {
         let Ok(snapshot) = serde_json::from_slice::<Snapshot>(&data) else {
             continue;
         };
-        out.push(SnapshotMeta::of(&snapshot));
+        out.push(SnapshotMeta::of(&snapshot, data.len() as u64));
     }
     out.sort_unstable_by_key(|m| std::cmp::Reverse(m.created));
     Ok(out)

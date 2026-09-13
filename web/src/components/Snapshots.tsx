@@ -43,6 +43,8 @@ export function Snapshots({ root }: { root: string }) {
     [selected],
   )
 
+  const storedBytes = list.data?.snapshots.reduce((sum, s) => sum + s.file_bytes, 0) ?? 0
+
   return (
     <div className="snapshots">
       <div className="snap-bar">
@@ -52,6 +54,11 @@ export function Snapshots({ root }: { root: string }) {
         <span className="snap-root" title={root}>
           {root}
         </span>
+        {storedBytes > 0 && (
+          <span className="snap-stored" title="Space the snapshot files take on disk">
+            {bytes(storedBytes)} stored
+          </span>
+        )}
       </div>
 
       {!list.data ? (
@@ -67,7 +74,8 @@ export function Snapshots({ root }: { root: string }) {
               <div className="snap-info" title={s.root}>
                 <span className="snap-name">{s.name}</span>
                 <span className="snap-meta">
-                  {mtime(s.created)} · {count(s.entries)} files · {bytes(s.bytes)}
+                  {mtime(s.created)} · {count(s.entries)} files · {bytes(s.bytes)} · snapshot{' '}
+                  {bytes(s.file_bytes)}
                 </span>
               </div>
               <button onClick={() => setSelected(selected === s.name ? null : s.name)}>

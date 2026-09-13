@@ -845,6 +845,12 @@ button {
   color: var(--fg-faint);
   font-size: 11px;
 }
+.snap-stored {
+  flex: none;
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
 .snap-row {
   display: flex;
   align-items: center;
