@@ -195,10 +195,10 @@ impl Scanner {
             };
 
             // Cloud placeholders report their full size but occupy nothing
-            // here. Files are always classified, whether or not --local-only
-            // was given, because the duplicate scanner must never read one:
-            // that would make the sync filter download it. Directories only
-            // need the check when the filter is on, and it costs a syscall.
+            // here. Files are always classified, whether or not the filter is
+            // on, because the duplicate scanner must never read one: that
+            // would make the sync filter download it. Directories only need
+            // the check when the filter is on, and it costs a syscall.
             let cloud = if kind == Kind::Dir {
                 self.opts.local_only && fsext::is_cloud_backed(&md, &child)
             } else {

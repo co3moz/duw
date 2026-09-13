@@ -39,11 +39,10 @@ fn run() -> Result<(), String> {
         eprintln!("duw: warning: --one-file-system is not supported on this platform, ignoring");
     }
 
-    if args.local_only && !fsext::CLOUD_DETECTION_SUPPORTED {
-        eprintln!("duw: warning: --local-only is not supported on this platform, ignoring");
-    }
-
     let exclude = build_excludes(&args)?;
+
+    // Cloud placeholders are hidden unless the user explicitly asks for them.
+    let local_only = !args.include_cloud && fsext::CLOUD_DETECTION_SUPPORTED;
 
     let opts = ScanOpts {
         root: root.clone(),
@@ -53,7 +52,7 @@ fn run() -> Result<(), String> {
         max_depth: args.max_depth,
         exclude,
         threads: args.threads,
-        local_only: args.local_only && fsext::CLOUD_DETECTION_SUPPORTED,
+        local_only,
     };
 
     let scanner = Scanner::new(opts).map_err(|e| format!("cannot scan {}: {e}", root.display()))?;
@@ -65,7 +64,7 @@ fn run() -> Result<(), String> {
         scanner: Arc::clone(&scanner),
         dupes: Arc::clone(&dupes),
         root: root.display().to_string(),
-        local_only: args.local_only && fsext::CLOUD_DETECTION_SUPPORTED,
+        local_only,
         dupes_min: args.duplicates_min,
         shutdown: shutdown_rx,
     };

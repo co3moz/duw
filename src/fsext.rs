@@ -38,13 +38,16 @@ mod imp {
         }
     }
 
-    pub fn is_cloud_backed(_md: &Metadata, _path: &Path) -> bool {
-        false
+    /// A file that reports a size but occupies no blocks is not actually on
+    /// this disk. macOS uses exactly this for evicted iCloud files, and sparse
+    /// files look the same even though their bytes are not stored either.
+    pub fn is_cloud_backed(md: &Metadata, _path: &Path) -> bool {
+        md.blocks() == 0 && md.len() > 0
     }
 
     pub const ONE_FILE_SYSTEM_SUPPORTED: bool = true;
     pub const HARDLINK_DEDUP_SUPPORTED: bool = true;
-    pub const CLOUD_DETECTION_SUPPORTED: bool = false;
+    pub const CLOUD_DETECTION_SUPPORTED: bool = true;
 }
 
 #[cfg(windows)]
@@ -218,3 +221,39 @@ pub use imp::{
     device, hardlink_key, init, is_cloud_backed, sizes, CLOUD_DETECTION_SUPPORTED,
     HARDLINK_DEDUP_SUPPORTED, ONE_FILE_SYSTEM_SUPPORTED,
 };
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::is_cloud_backed;
+    use std::io::Write;
+
+    fn temp_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("duw-{tag}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn a_file_with_no_blocks_is_cloud_backed() {
+        let path = temp_path("sparse");
+        let _ = std::fs::remove_file(&path);
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(1 << 20)
+            .unwrap();
+        let backed = is_cloud_backed(&std::fs::metadata(&path).unwrap(), &path);
+        let _ = std::fs::remove_file(&path);
+        assert!(backed);
+    }
+
+    #[test]
+    fn a_written_file_is_local() {
+        let path = temp_path("local");
+        let _ = std::fs::remove_file(&path);
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(b"hello")
+            .unwrap();
+        let backed = is_cloud_backed(&std::fs::metadata(&path).unwrap(), &path);
+        let _ = std::fs::remove_file(&path);
+        assert!(!backed);
+    }
+}

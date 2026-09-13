@@ -41,7 +41,7 @@ pub struct Node {
     pub read: bool,
     /// Reading this entry failed.
     pub err: bool,
-    /// Held back by `--local-only`: its bytes live in the cloud, not here.
+    /// Filtered out as cloud-backed: its bytes live in the cloud, not here.
     pub cloud: bool,
     pub children: Vec<u32>,
 }

@@ -37,10 +37,11 @@ pub struct Args {
     #[arg(short = 'l', long)]
     pub count_links: bool,
 
-    /// Ignore files and folders whose contents live in the cloud rather than on
-    /// this disk, such as OneDrive or iCloud placeholders (Windows only).
+    /// Include files and folders whose contents live in the cloud rather than
+    /// on this disk, such as OneDrive or iCloud placeholders. They report a
+    /// size they do not occupy, so they are skipped by default.
     #[arg(long)]
-    pub local_only: bool,
+    pub include_cloud: bool,
 
     /// Do not descend more than N levels below the starting directory.
     #[arg(short = 'd', long, value_name = "N")]

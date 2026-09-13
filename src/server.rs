@@ -77,7 +77,7 @@ struct FullState {
     root: String,
     root_id: u32,
     platform: Platform,
-    /// Whether the scan was run with --local-only, so the UI knows when the
+    /// Whether cloud placeholders are being hidden, so the UI knows when the
     /// cloud markers on entries are actually being acted on.
     local_only: bool,
     dupes_min: u64,
