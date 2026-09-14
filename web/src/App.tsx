@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, HttpError, filterActive, type FilterSpec, type Kind, type Metric, type SortKey } from './api'
+import { api, HttpError, filterActive, type DupeProgress, type FilterSpec, type Kind, type Metric, type SortKey } from './api'
 import { bytes, count, duration, parseSize, AGE_STOPS } from './format'
 import { useElementSize } from './useElementSize'
 import { useDebounced, useLive, useResource, useThrottled } from './useLive'
 import { Treemap } from './components/Treemap'
 import { FolderRows, LargestRows, ListHeader, SearchRows, TypeRows } from './components/Rows'
-import { Duplicates } from './components/Duplicates'
+import { Duplicates, DUPE_RUNNING_PHASES } from './components/Duplicates'
 import { Snapshots } from './components/Snapshots'
 
 type Tab = 'folders' | 'types' | 'largest' | 'duplicates' | 'snapshots'
@@ -321,6 +321,7 @@ export default function App() {
   const view = node.data
   const total = metric === 'alloc' ? view.alloc : view.size
   const scanning = progress?.scanning ?? false
+  const dupeRunning = dupes != null && DUPE_RUNNING_PHASES.includes(dupes.phase)
   const stats = progress?.stats
   const splitStyle =
     listWidth != null
@@ -395,15 +396,17 @@ export default function App() {
           {!!stats?.errors && <Stat label="unreadable" value={count(stats.errors)} warn />}
           {!!stats?.skipped && <Stat label="skipped" value={count(stats.skipped)} />}
           <div className="spacer" />
-          <div className={'status' + (scanning ? ' status-live' : '')}>
+          <div className={'status' + (scanning || dupeRunning ? ' status-live' : '')}>
             {progress?.cancelled
               ? 'scan stopped'
               : scanning
                 ? 'scanning'
-                : `scan complete in ${duration(progress?.elapsed_ms ?? 0)}`}
+                : dupeRunning && dupes
+                  ? `checking duplicates · ${dupeActivity(dupes)}`
+                  : `scan complete in ${duration(progress?.elapsed_ms ?? 0)}`}
           </div>
         </div>
-        {scanning && <div className="scanline" />}
+        {(scanning || dupeRunning) && <div className="scanline" />}
       </header>
 
       <main className="split" ref={splitRef} style={splitStyle}>
@@ -663,6 +666,13 @@ export default function App() {
       )}
     </div>
   )
+}
+
+/** One-line summary of what a duplicate run is doing right now. */
+function dupeActivity(progress: DupeProgress): string {
+  return progress.phase === 'grouping'
+    ? `${count(progress.checked)} files checked`
+    : `${count(progress.read)} files read`
 }
 
 function Stat({

@@ -11,7 +11,8 @@ const THRESHOLDS = [
   { label: '100 MB', value: 104857600 },
 ]
 
-const RUNNING: DupeProgress['phase'][] = ['grouping', 'windowing', 'hashing']
+/** Phases in which a duplicate run is still doing work. */
+export const DUPE_RUNNING_PHASES: DupeProgress['phase'][] = ['grouping', 'windowing', 'hashing']
 
 const PHASE_LABEL: Record<DupeProgress['phase'], string> = {
   idle: 'not started',
@@ -50,7 +51,7 @@ export function Duplicates({
   onCancel: () => void
   onMenu?: MenuHandler
 }) {
-  const running = RUNNING.includes(progress.phase)
+  const running = DUPE_RUNNING_PHASES.includes(progress.phase)
   const done = progress.phase === 'done' && matchesScope
 
   return (
