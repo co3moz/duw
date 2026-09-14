@@ -2,14 +2,17 @@
 //!
 //! Three stages, each one only looking at what survived the previous:
 //!
-//! 1. refresh metadata and group by current size,
+//! 1. group by the sizes the scan recorded,
 //! 2. hash a small window at each end of the file, which separates files that
 //!    merely share a header,
 //! 3. hash the whole file.
 //!
 //! In a typical tree the first stage decides almost everything, so the number
-//! of files actually read is a small fraction of the number scanned. Digests
-//! are recomputed on each run so a rescan also observes changed file contents.
+//! of files actually read is a small fraction of the number scanned. Grouping
+//! uses the tree as the inventory rather than re-statting the filesystem: a
+//! folder whose sizes changed on disk is refreshed by a rescan. Digests are
+//! recomputed on each run, so changed contents are still observed and files
+//! that changed size are dropped while hashing.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -30,9 +33,6 @@ const WINDOW: u64 = 16 * 1024;
 /// At or below this size the window stage is pointless, so hash the whole file.
 const SMALL_FILE: u64 = 64 * 1024;
 const READ_BUF: usize = 256 * 1024;
-/// Candidates refreshed per parallel batch in stage 1; small enough that a
-/// cancel is noticed quickly, large enough to keep every core busy.
-const STAT_BATCH: usize = 8 * 1024;
 
 pub type Digest = [u8; 32];
 
@@ -55,9 +55,9 @@ pub struct DupeProgress {
     pub min_size: u64,
     /// Files that survived the size grouping.
     pub candidates: u64,
-    /// Files whose metadata has been refreshed so far while grouping.
+    /// Files the grouping stage considered.
     pub checked: u64,
-    /// Files grouping will refresh in total.
+    /// Files the grouping stage considers in total.
     pub files_total: u64,
     pub read: u64,
     pub bytes_read: u64,
@@ -223,49 +223,28 @@ impl Dupes {
 
     /// Returns false when the run was superseded or cancelled.
     fn work(&self, scope: u32, min_size: u64, generation: u64, started: Instant) -> bool {
-        // Refresh sizes before grouping: the filesystem can change after the
-        // walk. This is the one pass over every file, so it runs in parallel
-        // batches instead of costing the run's whole budget on one thread.
+        // Group by the sizes the scan recorded. The tree is the inventory:
+        // files that changed on disk are caught again while hashing, and one
+        // that grew past the threshold appears after a rescan refreshes the
+        // tree. Re-statting every file here costs a full pass over the disk,
+        // which is the user's call to make with a rescan.
         let candidates = {
             let t = self.tree.read().unwrap();
-            t.duplicate_candidates(scope, 1)
+            t.duplicate_candidates(scope, min_size.max(1))
         };
         if self.stale(generation) {
             return false;
         }
 
-        let mut refreshed: Vec<(u64, Candidate)> = Vec::new();
-        let mut remaining = candidates;
-        let files_total = remaining.len() as u64;
-        self.update(generation, |p| p.files_total = files_total);
-        let mut checked = 0u64;
-        while !remaining.is_empty() {
-            if self.stale(generation) {
-                return false;
-            }
-            let cut = remaining.len().saturating_sub(STAT_BATCH);
-            let batch = remaining.split_off(cut);
-            let batch_len = batch.len() as u64;
-            refreshed.par_extend(batch.into_par_iter().filter_map(|mut c| {
-                let path = self.path_of(&c);
-                let md = std::fs::metadata(&path).ok()?;
-                if !md.is_file() || fsext::is_cloud_backed(&md, &path) || md.len() < min_size.max(1)
-                {
-                    return None;
-                }
-                c.size = md.len();
-                Some((c.size, c))
-            }));
-            checked += batch_len;
-            self.update(generation, |p| p.checked = checked);
-        }
-        if self.stale(generation) {
-            return false;
-        }
+        let considered = candidates.len() as u64;
+        self.update(generation, |p| {
+            p.checked = considered;
+            p.files_total = considered;
+        });
 
         let mut by_size: HashMap<u64, Vec<Candidate>> = HashMap::new();
-        for (size, c) in refreshed {
-            by_size.entry(size).or_default().push(c);
+        for c in candidates {
+            by_size.entry(c.size).or_default().push(c);
         }
         by_size.retain(|_, group| group.len() > 1);
 
@@ -515,6 +494,14 @@ mod tests {
             assert!(self.dupes.work(ROOT, min, generation, Instant::now()));
             self.dupes.progress.lock().unwrap().phase = Phase::Done;
         }
+        /// Applies new sizes to the tree, the way a rescan would.
+        fn set_sizes(&self, size: u64) {
+            let mut t = self.dupes.tree.write().unwrap();
+            let ids: Vec<u32> = t.nodes[self.dir as usize].children.clone();
+            for id in ids {
+                t.restat(id, size, size, 0, false, false);
+            }
+        }
     }
 
     impl Drop for Fixture {
@@ -532,12 +519,20 @@ mod tests {
         let f = Fixture::new();
         f.run(1);
         assert_eq!(f.dupes.groups().len(), 1);
+
+        // Same size, new content: the fresh digest separates them.
         std::fs::write(f.root.join("sub/b"), b"bbbb").unwrap();
         f.run(1);
         assert!(f.dupes.groups().is_empty());
+
+        // A grown file stays out until the tree is refreshed, the way a
+        // rescan updates it: grouping trusts the scan's sizes.
         for name in ["a", "b"] {
             std::fs::write(f.root.join("sub").join(name), b"larger").unwrap();
         }
+        f.run(6);
+        assert!(f.dupes.groups().is_empty());
+        f.set_sizes(6);
         f.run(6);
         assert_eq!(f.dupes.groups()[0].size, 6);
     }
@@ -547,7 +542,7 @@ mod tests {
         let f = Fixture::new();
         f.run(1);
         let p = f.dupes.progress();
-        // Both files were refreshed before the size groups were published.
+        // Both files were part of the size grouping that was published.
         assert_eq!(p.checked, 2);
         assert_eq!(p.files_total, 2);
         assert_eq!(p.candidates, 2);

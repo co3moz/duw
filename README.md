@@ -41,7 +41,8 @@ cargo install duw
 - **Largest files**: the 100 biggest files below the current folder.
 - **Duplicates**: files with identical contents, grouped and sorted by how
   much deleting the copies would free. This one reads file contents, so it only
-  runs when you ask for it.
+  runs when you ask for it. It groups by the sizes the scan recorded, so
+  rescan a folder whose contents changed before comparing.
 - **Snapshots**: save the current scan and compare a later one against it to
   see what grew or shrank.
 - **Filters**: search by name, extension, size and age. Matching covers the
