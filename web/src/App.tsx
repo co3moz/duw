@@ -233,6 +233,11 @@ export default function App() {
     }
   }, [])
 
+  const rescanEntry = useCallback(async (id: number) => {
+    const res = await api.rescan(id)
+    if (!res.ok) window.alert(await res.text())
+  }, [])
+
   const moveToTrash = useCallback(async (id: number, name: string) => {
     if (!window.confirm(`Move "${name}" to the trash?`)) return
     const res = await api.trash(id)
@@ -611,9 +616,20 @@ export default function App() {
             role="menu"
             style={{
               left: Math.min(menu.x, window.innerWidth - 200),
-              top: Math.min(menu.y, window.innerHeight - 110),
+              top: Math.min(menu.y, window.innerHeight - 150),
             }}
           >
+            <button
+              role="menuitem"
+              disabled={scanning}
+              title={scanning ? 'Wait for the current scan to finish' : undefined}
+              onClick={() => {
+                setMenu(null)
+                void rescanEntry(menu.id)
+              }}
+            >
+              Rescan
+            </button>
             <button
               role="menuitem"
               onClick={() => {

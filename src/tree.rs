@@ -275,6 +275,85 @@ impl Tree {
         true
     }
 
+    /// Detaches every child of a directory so its contents can be walked
+    /// again. Totals and global stats shrink to just the directory itself; the
+    /// node stays addressable for the UI.
+    pub fn reset_children(&mut self, id: u32) -> bool {
+        if self.get(id).is_none() || self.nodes[id as usize].kind != Kind::Dir {
+            return false;
+        }
+        let children = std::mem::take(&mut self.nodes[id as usize].children);
+        for child in children {
+            self.remove(child);
+        }
+        let n = &mut self.nodes[id as usize];
+        n.read = false;
+        n.err = false;
+        self.version += 1;
+        true
+    }
+
+    /// Re-applies an entry's own stat values after a rescan. Only the node's
+    /// contribution changes; its children are left alone.
+    pub fn restat(
+        &mut self,
+        id: u32,
+        size: u64,
+        alloc: u64,
+        mtime: i64,
+        err: bool,
+        cloud: bool,
+    ) -> bool {
+        if self.get(id).is_none() {
+            return false;
+        }
+        let n = &mut self.nodes[id as usize];
+        let (old_size, old_alloc) = (n.self_size, n.self_alloc);
+        n.self_size = size;
+        n.self_alloc = alloc;
+        n.mtime = mtime;
+        n.err = err;
+        n.cloud = cloud;
+
+        if size > old_size {
+            self.propagate(id, size - old_size, 0, 0, 0);
+        } else if size < old_size {
+            self.subtract(id, old_size - size, 0, 0, 0);
+        }
+        if alloc > old_alloc {
+            self.propagate(id, 0, alloc - old_alloc, 0, 0);
+        } else if alloc < old_alloc {
+            self.subtract(id, 0, old_alloc - alloc, 0, 0);
+        }
+        if size >= old_size {
+            self.stats.size += size - old_size;
+        } else {
+            self.stats.size = self.stats.size.saturating_sub(old_size - size);
+        }
+        if alloc >= old_alloc {
+            self.stats.alloc += alloc - old_alloc;
+        } else {
+            self.stats.alloc = self.stats.alloc.saturating_sub(old_alloc - alloc);
+        }
+        self.version += 1;
+        true
+    }
+
+    /// Forgets recorded errors under `prefix` (an absolute path) so a rescan
+    /// reports fresh ones instead of piling up stale counts.
+    pub fn clear_errors_under(&mut self, prefix: &str) {
+        let child = if prefix.ends_with(std::path::MAIN_SEPARATOR) {
+            prefix.to_string()
+        } else {
+            format!("{prefix}{}", std::path::MAIN_SEPARATOR)
+        };
+        let before = self.errors.len();
+        self.errors
+            .retain(|e| e.path != prefix && !e.path.starts_with(&child));
+        let removed = (before - self.errors.len()) as u64;
+        self.stats.errors = self.stats.errors.saturating_sub(removed);
+    }
+
     fn subtract(&mut self, from: u32, size: u64, alloc: u64, files: u32, dirs: u32) {
         let mut id = from;
         loop {
@@ -1077,6 +1156,51 @@ mod tests {
             .children_view(dir, false, SortKey::Size, false, 10)
             .is_none());
         assert!(t.duplicate_candidates(dir, 1).is_empty());
+    }
+
+    #[test]
+    fn reset_and_restat_keep_totals_coherent() {
+        let mut t = Tree::new("root".into(), 0, 0, 0);
+        let dir = t.add_children(ROOT, vec![entry("sub", Kind::Dir, 4)])[0];
+        t.add_children(
+            dir,
+            vec![entry("a", Kind::File, 10), entry("b", Kind::File, 20)],
+        );
+        assert_eq!(t.nodes[ROOT as usize].total_size, 34);
+
+        // Dropping the children leaves the directory's own size behind.
+        assert!(t.reset_children(dir));
+        assert_eq!(t.nodes[ROOT as usize].total_size, 4);
+        assert_eq!(t.nodes[dir as usize].files, 0);
+        assert_eq!(t.stats.files, 0);
+        assert_eq!(t.stats.size, 4);
+        assert_eq!(t.stats.dirs, 1);
+
+        // Re-adding replaces the old contents without double counting.
+        t.add_children(dir, vec![entry("c", Kind::File, 7)]);
+        assert_eq!(t.nodes[ROOT as usize].total_size, 11);
+        assert_eq!(t.stats.files, 1);
+
+        // A restat only moves the node's own contribution.
+        assert!(t.restat(dir, 6, 8, 123, false, false));
+        assert_eq!(t.nodes[ROOT as usize].total_size, 13);
+        assert_eq!(t.nodes[ROOT as usize].total_alloc, 15);
+        assert_eq!(t.nodes[dir as usize].mtime, 123);
+        assert_eq!(t.stats.size, 13);
+    }
+
+    #[test]
+    fn clear_errors_under_prunes_the_subtree() {
+        let mut t = Tree::new("root".into(), 0, 0, 0);
+        let sep = std::path::MAIN_SEPARATOR;
+        let sub = format!("root{sep}sub");
+        t.record_error(format!("{sub}{sep}file"), "denied".into());
+        t.record_error(sub.clone(), "denied".into());
+        t.record_error(format!("root{sep}other"), "denied".into());
+        t.clear_errors_under(&sub);
+        assert_eq!(t.errors.len(), 1);
+        assert_eq!(t.errors[0].path, format!("root{sep}other"));
+        assert_eq!(t.stats.errors, 1);
     }
 
     #[test]

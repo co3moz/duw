@@ -48,9 +48,10 @@ cargo install duw
   whole folder in view and the treemap narrows with it.
 - **Age map**: colour by how long since each entry was modified, from green
   (touched recently) to red (untouched for years).
-- **Actions**: right-click an entry (or use the ⋯ button) to reveal it in the
-  file manager, copy its path, or move it to the trash. Deleting is always
-  recoverable.
+- **Actions**: right-click an entry (or use the ⋯ button) to rescan it, reveal
+  it in the file manager, copy its path, or move it to the trash. A rescan
+  re-reads that entry from disk, so files added or removed elsewhere show up
+  without a full scan. Deleting is always recoverable.
 - **Treemap**: three levels deep. Click a rectangle to go into it.
 
 Click a column header to sort by name, modified date, file count or size.

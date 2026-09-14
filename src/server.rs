@@ -62,6 +62,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/abs/{id}", get(abs_path))
         .route("/api/reveal/{id}", post(reveal))
         .route("/api/trash/{id}", post(trash_node))
+        .route("/api/rescan/{id}", post(rescan_node))
         .route("/api/snapshots", get(list_snapshots).post(save_snapshot))
         .route("/api/snapshots/{name}", delete(delete_snapshot))
         .route("/api/snapshots/{name}/diff", get(snapshot_diff))
@@ -116,7 +117,7 @@ fn progress_of(state: &AppState) -> Progress {
     let root = &t.nodes[0];
     Progress {
         version: t.version,
-        scanning: !state.scanner.is_done(),
+        scanning: state.scanner.is_busy(),
         cancelled: state.scanner.is_cancelled(),
         elapsed_ms: state.scanner.elapsed_ms(),
         current: t.current.clone(),
@@ -268,7 +269,7 @@ async fn node(
         children: view.children,
         other: view.other,
         version: t.version,
-        scanning: !state.scanner.is_done(),
+        scanning: state.scanner.is_busy(),
     })
     .into_response()
 }
@@ -527,7 +528,7 @@ async fn trash_node(
     if id == ROOT {
         return (StatusCode::BAD_REQUEST, "cannot move the scan root").into_response();
     }
-    if !state.scanner.is_done() {
+    if state.scanner.is_busy() {
         return (StatusCode::CONFLICT, "a scan is still running").into_response();
     }
     let Some(path) = node_path(&state, id) else {
@@ -545,6 +546,28 @@ async fn trash_node(
     state.scanner.tree.write().unwrap().remove(id);
     state.dupes.forget_removed();
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// Re-reads one entry from disk. Directories are walked again recursively,
+/// while files and links only get a fresh stat; an entry that vanished in the
+/// meantime is detached from the tree.
+async fn rescan_node(
+    State(state): State<AppState>,
+    Path(id): Path<u32>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if cross_site(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-site request rejected").into_response();
+    }
+    let Some(path) = node_path(&state, id) else {
+        return (StatusCode::NOT_FOUND, "no such node").into_response();
+    };
+    // The old results describe a tree that is about to change.
+    state.dupes.forget_removed();
+    if !state.scanner.rescan(id, path) {
+        return (StatusCode::CONFLICT, "a scan is still running").into_response();
+    }
+    StatusCode::ACCEPTED.into_response()
 }
 
 #[derive(Serialize)]
@@ -583,7 +606,7 @@ async fn save_snapshot(
     if cross_site(&headers) {
         return (StatusCode::FORBIDDEN, "cross-site request rejected").into_response();
     }
-    if !state.scanner.is_done() {
+    if state.scanner.is_busy() {
         return (StatusCode::CONFLICT, "a scan is still running").into_response();
     }
     let name = q
@@ -732,7 +755,7 @@ async fn start_duplicates(
     Path(id): Path<u32>,
     Query(q): Query<DupeQuery>,
 ) -> impl IntoResponse {
-    if !state.scanner.is_done() {
+    if state.scanner.is_busy() {
         return (StatusCode::CONFLICT, "a scan is still running").into_response();
     }
     if state.scanner.tree.read().unwrap().get(id).is_none() {
@@ -812,6 +835,7 @@ mod tests {
             ("POST", "/api/duplicates/cancel"),
             ("POST", "/api/trash/0"),
             ("POST", "/api/reveal/0"),
+            ("POST", "/api/rescan/0"),
             ("POST", "/api/snapshots"),
             ("DELETE", "/api/snapshots/test"),
         ] {
@@ -856,6 +880,57 @@ mod tests {
                 .status(),
             StatusCode::ACCEPTED
         );
+    }
+
+    async fn wait_idle(scanner: &Scanner) {
+        for _ in 0..200 {
+            if !scanner.is_busy() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("rescan never finished");
+    }
+
+    #[tokio::test]
+    async fn rescan_picks_up_and_drops_files() {
+        let f = Fixture::new(true);
+        std::fs::write(f.root.join("added.txt"), b"hello").unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/rescan/0")
+            .body(Body::empty())
+            .unwrap();
+        let response = router(f.state.clone()).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        wait_idle(&f.state.scanner).await;
+        {
+            let t = f.state.scanner.tree.read().unwrap();
+            assert_eq!(t.stats.files, 1);
+            assert!(t
+                .children_view(ROOT, false, SortKey::Size, false, 10)
+                .unwrap()
+                .children
+                .iter()
+                .any(|e| e.name == "added.txt"));
+        }
+
+        std::fs::remove_file(f.root.join("added.txt")).unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/rescan/0")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router(f.state.clone())
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        wait_idle(&f.state.scanner).await;
+        assert_eq!(f.state.scanner.tree.read().unwrap().stats.files, 0);
     }
 
     #[tokio::test]

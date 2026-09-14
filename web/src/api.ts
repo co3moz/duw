@@ -287,6 +287,8 @@ export const api = {
 
   trash: (id: number) => fetch(`/api/trash/${id}`, { method: 'POST' }),
 
+  rescan: (id: number) => fetch(`/api/rescan/${id}`, { method: 'POST' }),
+
   duplicates: (id: number, limit: number, signal?: AbortSignal) =>
     get<{
       progress: DupeProgress

@@ -939,6 +939,13 @@ button {
 .menu button:hover {
   background: var(--bg-hover);
 }
+.menu button:disabled {
+  color: var(--fg-faint);
+  cursor: default;
+}
+.menu button:disabled:hover {
+  background: none;
+}
 .menu .menu-danger {
   color: var(--err);
 }

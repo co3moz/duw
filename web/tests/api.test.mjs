@@ -11,6 +11,19 @@ test('404 keeps its status for folder fallback', async () => {
   } finally { globalThis.fetch = original }
 })
 
+test('rescan posts to the node', async () => {
+  const original = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), method: init?.method })
+    return new Response('', { status: 202 })
+  }
+  try {
+    await api.rescan(42)
+    assert.deepEqual(calls, [{ url: '/api/rescan/42', method: 'POST' }])
+  } finally { globalThis.fetch = original }
+})
+
 test('map and list send identical filters including encoded names', async () => {
   const original = globalThis.fetch
   const urls = []
