@@ -860,7 +860,7 @@ mod tests {
             if done {
                 scanner.run();
             }
-            let dupes = Dupes::new(scanner.tree.clone(), root.clone());
+            let dupes = Dupes::new(scanner.tree.clone(), root.clone(), false);
             let (_, shutdown) = watch::channel(false);
             let state = AppState {
                 scanner,

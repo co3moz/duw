@@ -1,6 +1,7 @@
 mod actions;
 mod assets;
 mod cli;
+mod demo;
 mod dupes;
 mod fsext;
 mod scan;
@@ -9,6 +10,7 @@ mod snapshots;
 mod tree;
 
 use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,9 +35,19 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let args = Args::parse();
+    let demo = args.demo;
 
-    let root = dunce::canonicalize(&args.path)
-        .map_err(|e| format!("cannot open {}: {e}", args.path.display()))?;
+    // Demo mode never touches the filesystem; its root only names the tree.
+    let root = if demo {
+        if args.path == Path::new(".") {
+            PathBuf::from("atlas-archive")
+        } else {
+            args.path.clone()
+        }
+    } else {
+        dunce::canonicalize(&args.path)
+            .map_err(|e| format!("cannot open {}: {e}", args.path.display()))?
+    };
 
     if args.one_file_system && !fsext::ONE_FILE_SYSTEM_SUPPORTED {
         eprintln!("duw: warning: --one-file-system is not supported on this platform, ignoring");
@@ -57,16 +69,28 @@ fn run() -> Result<(), String> {
         local_only,
     };
 
-    let scanner = Scanner::new(opts).map_err(|e| format!("cannot scan {}: {e}", root.display()))?;
+    let scanner = if demo {
+        Scanner::new_demo(opts)
+    } else {
+        Scanner::new(opts).map_err(|e| format!("cannot scan {}: {e}", root.display()))?
+    };
 
     // Script and CI modes: scan synchronously, print, and never bind a port.
     if args.json || args.top.is_some() {
-        scanner.run();
+        if demo {
+            scanner.run_demo();
+        } else {
+            scanner.run();
+        }
         return print_report(&scanner, &root, &args);
     }
 
+    if demo {
+        println!("duw: demo mode, serving a synthetic tree");
+    }
+
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let dupes = Dupes::new(Arc::clone(&scanner.tree), root.clone());
+    let dupes = Dupes::new(Arc::clone(&scanner.tree), root.clone(), demo);
 
     let state = AppState {
         scanner: Arc::clone(&scanner),
@@ -84,7 +108,11 @@ fn run() -> Result<(), String> {
     std::thread::Builder::new()
         .name("duw-scan".into())
         .spawn(move || {
-            worker.run();
+            if demo {
+                worker.run_demo();
+            } else {
+                worker.run();
+            }
             // Duplicate detection needs the whole tree, so it waits for the
             // walk rather than racing it.
             if let Some(min) = auto_dupes {

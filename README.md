@@ -12,7 +12,7 @@ duw /var/log
 It scans a folder and shows what is using the space, updating while the scan
 runs.
 
-![The duw report: a folder list on the left, a treemap on the right](docs/screenshot.png)
+![A duw scan streaming into the browser: a folder list on the left, a treemap on the right](docs/demo.gif)
 
 ## Install
 

@@ -74,6 +74,10 @@ pub struct Args {
     /// Smallest file the duplicate scanner considers, e.g. 512K, 10M, 1G.
     #[arg(long, value_name = "SIZE", default_value = "512K", value_parser = parse_size)]
     pub duplicates_min: u64,
+
+    /// Serve a synthetic tree with a simulated scan, for screenshots and GIFs.
+    #[arg(long, hide = true)]
+    pub demo: bool,
 }
 
 /// Accepts a plain byte count or a K/M/G suffix, the way `du -t` does.

@@ -28,6 +28,10 @@ pub struct ScanOpts {
     pub local_only: bool,
 }
 
+/// Pause between directories in `--demo`, so the simulated walk takes long
+/// enough to be seen.
+const DEMO_DIR_MS: u64 = 20;
+
 pub struct Scanner {
     pub tree: Arc<RwLock<Tree>>,
     opts: ScanOpts,
@@ -216,6 +220,104 @@ impl Scanner {
             let inner = Arc::clone(&me);
             s.spawn(move |s| inner.walk(id, path, depth, Vec::new(), links, s));
         });
+    }
+
+    /// Builds a scanner with an empty tree and no filesystem access, for the
+    /// hidden `--demo` flag. [`Scanner::run_demo`] fills the tree instead.
+    pub fn new_demo(opts: ScanOpts) -> Arc<Self> {
+        let name = display_root(&opts.root);
+        Arc::new(Scanner {
+            tree: Arc::new(RwLock::new(Tree::new(name, 0, 0, 0))),
+            root_device: 0,
+            opts,
+            cancel: AtomicBool::new(false),
+            done: AtomicBool::new(false),
+            busy: AtomicBool::new(false),
+            started: Instant::now(),
+            rescan_start: Mutex::new(None),
+            final_ms: AtomicU64::new(0),
+            seen_links: Arc::new(Mutex::new(HashSet::new())),
+        })
+    }
+
+    /// Streams the synthetic tree from [`crate::demo`] into memory with a
+    /// pause between directories, standing in for a real walk. Nothing is
+    /// read from disk, so screenshots and GIFs need no prepared tree.
+    pub fn run_demo(self: &Arc<Self>) {
+        self.demo_walk(std::time::Duration::from_millis(DEMO_DIR_MS));
+    }
+
+    fn demo_walk(self: &Arc<Self>, pause: std::time::Duration) {
+        let mut walk = DemoWalk::new(pause);
+        walk.now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if let Some(root) = self.tree.write().unwrap().nodes.get_mut(ROOT as usize) {
+            root.mtime = walk.now;
+        }
+        self.demo_dir(ROOT, "", &mut walk);
+
+        self.finish();
+        let mut t = self.tree.write().unwrap();
+        t.current.clear();
+        t.version += 1;
+    }
+
+    fn demo_dir(&self, id: u32, rel: &str, walk: &mut DemoWalk) {
+        if self.is_cancelled() {
+            return;
+        }
+        std::thread::sleep(walk.pause);
+        if self.is_cancelled() {
+            return;
+        }
+
+        let subs: Vec<String> = walk
+            .dirs
+            .get(rel)
+            .map(|s| s.keys().cloned().collect())
+            .unwrap_or_default();
+        let leaves: Vec<(String, u64)> = walk.files.get(rel).cloned().unwrap_or_default();
+        let mut entries: Vec<NewEntry> = Vec::with_capacity(subs.len() + leaves.len());
+        for name in &subs {
+            entries.push(NewEntry {
+                name: name.clone(),
+                kind: Kind::Dir,
+                size: 0,
+                alloc: 0,
+                mtime: walk.now,
+                err: false,
+                cloud: false,
+            });
+        }
+        for (name, size) in &leaves {
+            walk.clock += 1;
+            entries.push(NewEntry {
+                name: name.clone(),
+                kind: Kind::File,
+                size: *size,
+                alloc: *size,
+                mtime: walk.now - (walk.clock % 700) * 86_400,
+                err: false,
+                cloud: false,
+            });
+        }
+
+        let child_ids = self.tree.write().unwrap().add_children(id, entries);
+        self.tree.write().unwrap().current = if rel.is_empty() {
+            self.opts.root.display().to_string()
+        } else {
+            self.opts.root.join(rel).display().to_string()
+        };
+        for (child, name) in child_ids.into_iter().zip(subs) {
+            let child_rel = if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            };
+            self.demo_dir(child, &child_rel, walk);
+        }
     }
 
     /// Blocks until the whole tree has been walked. Meant to be called from a
@@ -466,9 +568,69 @@ fn display_root(path: &Path) -> String {
     }
 }
 
+/// Directory index built once for the simulated `--demo` walk.
+struct DemoWalk {
+    files: std::collections::BTreeMap<String, Vec<(String, u64)>>,
+    dirs: std::collections::BTreeMap<String, std::collections::BTreeMap<String, ()>>,
+    now: i64,
+    clock: i64,
+    pause: std::time::Duration,
+}
+
+impl DemoWalk {
+    fn new(pause: std::time::Duration) -> Self {
+        let mut files: std::collections::BTreeMap<String, Vec<(String, u64)>> =
+            std::collections::BTreeMap::new();
+        let mut dirs: std::collections::BTreeMap<String, std::collections::BTreeMap<String, ()>> =
+            std::collections::BTreeMap::new();
+        for (path, size) in crate::demo::atlas() {
+            let (dir, name) = path.rsplit_once('/').unwrap_or(("", path.as_str()));
+            files
+                .entry(dir.to_string())
+                .or_default()
+                .push((name.to_string(), size));
+            let mut cur = dir.to_string();
+            while !cur.is_empty() {
+                let (parent, base) = cur.rsplit_once('/').unwrap_or(("", cur.as_str()));
+                dirs.entry(parent.to_string())
+                    .or_default()
+                    .insert(base.to_string(), ());
+                cur = parent.to_string();
+            }
+        }
+        DemoWalk {
+            files,
+            dirs,
+            now: 0,
+            clock: 0,
+            pause,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demo_walk_builds_the_synthetic_tree() {
+        let scanner = Scanner::new_demo(ScanOpts {
+            root: PathBuf::from("atlas-archive"),
+            one_file_system: false,
+            dereference: false,
+            count_links: false,
+            max_depth: None,
+            exclude: None,
+            threads: Some(1),
+            local_only: false,
+        });
+        scanner.demo_walk(std::time::Duration::ZERO);
+        let t = scanner.tree.read().unwrap();
+        assert_eq!(t.stats.files, crate::demo::atlas().len() as u64);
+        assert!(t.stats.dirs > 400);
+        assert!(t.nodes[ROOT as usize].children.len() > 5);
+        assert!(scanner.is_done());
+    }
 
     #[cfg(unix)]
     #[test]

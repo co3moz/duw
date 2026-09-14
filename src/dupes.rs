@@ -111,16 +111,19 @@ pub struct Dupes {
     groups: RwLock<Vec<DupeGroup>>,
     /// Incremented per run; a worker whose generation is stale gives up.
     generation: AtomicU64,
+    /// `--demo`: fabricate progress and groups instead of reading files.
+    demo: bool,
 }
 
 impl Dupes {
-    pub fn new(tree: Arc<RwLock<Tree>>, root: PathBuf) -> Arc<Self> {
+    pub fn new(tree: Arc<RwLock<Tree>>, root: PathBuf, demo: bool) -> Arc<Self> {
         Arc::new(Dupes {
             tree,
             root,
             progress: Mutex::new(DupeProgress::default()),
             groups: RwLock::new(Vec::new()),
             generation: AtomicU64::new(0),
+            demo,
         })
     }
 
@@ -223,6 +226,9 @@ impl Dupes {
 
     /// Returns false when the run was superseded or cancelled.
     fn work(&self, scope: u32, min_size: u64, generation: u64, started: Instant) -> bool {
+        if self.demo {
+            return self.work_demo(scope, min_size, generation);
+        }
         // Group by the sizes the scan recorded. The tree is the inventory:
         // files that changed on disk are caught again while hashing, and one
         // that grew past the threshold appears after a rescan refreshes the
@@ -328,6 +334,88 @@ impl Dupes {
             p.groups = group_count;
             p.wasted = total_wasted;
             p.elapsed_ms = started.elapsed().as_millis() as u64;
+        });
+        true
+    }
+
+    /// The fabricated `--demo` run: groups by the tree's sizes and walks the
+    /// counters on a timer instead of reading anything.
+    fn work_demo(&self, scope: u32, min_size: u64, generation: u64) -> bool {
+        let candidates = {
+            let t = self.tree.read().unwrap();
+            t.duplicate_candidates(scope, min_size.max(1))
+        };
+        if self.stale(generation) {
+            return false;
+        }
+        let considered = candidates.len() as u64;
+        self.update(generation, |p| {
+            p.checked = considered;
+            p.files_total = considered;
+        });
+
+        let mut by_size: HashMap<u64, Vec<Candidate>> = HashMap::new();
+        for c in candidates {
+            by_size.entry(c.size).or_default().push(c);
+        }
+        by_size.retain(|_, group| group.len() > 1);
+
+        let candidate_count: u64 = by_size.values().map(|g| g.len() as u64).sum();
+        let bytes_total: u64 = by_size.iter().map(|(size, g)| size * g.len() as u64).sum();
+        self.update(generation, |p| {
+            p.candidates = candidate_count;
+            p.bytes_total = bytes_total;
+            p.phase = Phase::Windowing;
+        });
+
+        // Same-size entries count as duplicates; only the clock advances.
+        const TICKS: u64 = 24;
+        for tick in 1..=TICKS {
+            if self.stale(generation) {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            let fraction = tick as f64 / TICKS as f64;
+            self.update(generation, |p| {
+                p.read = (candidate_count as f64 * fraction) as u64;
+                p.bytes_read = (bytes_total as f64 * fraction) as u64;
+                if tick == TICKS / 3 {
+                    p.phase = Phase::Hashing;
+                }
+            });
+        }
+        if self.stale(generation) {
+            return false;
+        }
+
+        let mut groups: Vec<DupeGroup> = by_size
+            .into_iter()
+            .map(|(size, files)| DupeGroup {
+                size,
+                wasted: size * (files.len() as u64 - 1),
+                files: files
+                    .into_iter()
+                    .map(|c| DupeFile {
+                        id: c.id,
+                        path: c.path,
+                    })
+                    .collect(),
+            })
+            .collect();
+        groups.sort_unstable_by(|a, b| b.wasted.cmp(&a.wasted).then(b.size.cmp(&a.size)));
+        let total_wasted: u64 = groups.iter().map(|g| g.wasted).sum();
+        let group_count = groups.len() as u64;
+
+        {
+            let mut g = self.groups.write().unwrap();
+            if self.stale(generation) {
+                return false;
+            }
+            *g = groups;
+        }
+        self.update(generation, |p| {
+            p.groups = group_count;
+            p.wasted = total_wasted;
         });
         true
     }
@@ -486,7 +574,7 @@ mod tests {
             for name in ["a", "b"] {
                 std::fs::write(root.join("sub").join(name), b"aaaa").unwrap();
             }
-            let dupes = Dupes::new(Arc::new(RwLock::new(tree)), root.clone());
+            let dupes = Dupes::new(Arc::new(RwLock::new(tree)), root.clone(), false);
             Self { root, dupes, dir }
         }
         fn run(&self, min: u64) {
