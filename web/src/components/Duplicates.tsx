@@ -108,13 +108,21 @@ export function Duplicates({
             <div
               className="bar-fill"
               style={{
-                width: `${Math.min(100, percent(progress.bytes_read, progress.bytes_total))}%`,
+                // Before anything is hashed there are no byte totals yet, so
+                // grouping answers to the file counts instead.
+                width: `${
+                  progress.phase === 'grouping'
+                    ? Math.min(100, percent(progress.checked, progress.files_total))
+                    : Math.min(100, percent(progress.bytes_read, progress.bytes_total))
+                }%`,
                 background: 'var(--accent)',
               }}
             />
           </div>
           <div className="dupes-phase">
-            {bytes(progress.bytes_read)} of {bytes(progress.bytes_total)}
+            {progress.phase === 'grouping'
+              ? `${count(progress.checked)} of ${count(progress.files_total)} files`
+              : `${bytes(progress.bytes_read)} of ${bytes(progress.bytes_total)}`}
           </div>
         </div>
       )}

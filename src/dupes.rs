@@ -57,6 +57,8 @@ pub struct DupeProgress {
     pub candidates: u64,
     /// Files whose metadata has been refreshed so far while grouping.
     pub checked: u64,
+    /// Files grouping will refresh in total.
+    pub files_total: u64,
     pub read: u64,
     pub bytes_read: u64,
     pub bytes_total: u64,
@@ -76,6 +78,7 @@ impl Default for DupeProgress {
             min_size: 0,
             candidates: 0,
             checked: 0,
+            files_total: 0,
             read: 0,
             bytes_read: 0,
             bytes_total: 0,
@@ -233,6 +236,8 @@ impl Dupes {
 
         let mut refreshed: Vec<(u64, Candidate)> = Vec::new();
         let mut remaining = candidates;
+        let files_total = remaining.len() as u64;
+        self.update(generation, |p| p.files_total = files_total);
         let mut checked = 0u64;
         while !remaining.is_empty() {
             if self.stale(generation) {
@@ -544,6 +549,7 @@ mod tests {
         let p = f.dupes.progress();
         // Both files were refreshed before the size groups were published.
         assert_eq!(p.checked, 2);
+        assert_eq!(p.files_total, 2);
         assert_eq!(p.candidates, 2);
     }
 

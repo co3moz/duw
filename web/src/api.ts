@@ -21,6 +21,8 @@ export interface DupeProgress {
   candidates: number
   /** Files whose metadata has been refreshed so far while grouping. */
   checked: number
+  /** Files grouping will refresh in total. */
+  files_total: number
   read: number
   bytes_read: number
   bytes_total: number
