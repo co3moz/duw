@@ -41,8 +41,22 @@ mod imp {
     /// A file that reports a size but occupies no blocks is not actually on
     /// this disk. macOS uses exactly this for evicted iCloud files, and sparse
     /// files look the same even though their bytes are not stored either.
+    ///
+    /// The block test only applies to files: APFS reports zero blocks for
+    /// ordinary directories, where the dataless flag is what marks a
+    /// placeholder instead.
     pub fn is_cloud_backed(md: &Metadata, _path: &Path) -> bool {
-        md.blocks() == 0 && md.len() > 0
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::macos::fs::MetadataExt;
+            /// `SF_DATALESS`: the entry stands in for data that is not stored
+            /// locally.
+            const SF_DATALESS: u32 = 0x4000_0000;
+            if md.st_flags() & SF_DATALESS != 0 {
+                return true;
+            }
+        }
+        !md.is_dir() && md.blocks() == 0 && md.len() > 0
     }
 
     pub const ONE_FILE_SYSTEM_SUPPORTED: bool = true;

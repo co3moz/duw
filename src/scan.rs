@@ -520,7 +520,16 @@ mod tests {
         scanner.run();
 
         let sub_id = scanner.tree.read().unwrap().nodes[ROOT as usize].children[0];
-        let before = scanner.tree.read().unwrap().stats.size;
+        // Directory sizes are filesystem specific (APFS counts entries, ext4
+        // keeps a fixed block), so compare the files themselves.
+        let file_bytes = |t: &Tree| -> u64 {
+            t.nodes[sub_id as usize]
+                .children
+                .iter()
+                .filter(|&&c| t.nodes[c as usize].kind == Kind::File)
+                .map(|&c| t.nodes[c as usize].self_size)
+                .sum()
+        };
 
         fs::write(sub.join("new.txt"), b"new!").unwrap();
         assert!(scanner.rescan(sub_id, sub.clone(), || {}));
@@ -530,7 +539,7 @@ mod tests {
         {
             let t = scanner.tree.read().unwrap();
             assert_eq!(t.stats.files, 2);
-            assert_eq!(t.stats.size, before + 4);
+            assert_eq!(file_bytes(&t), 7);
             let names: Vec<&str> = t.nodes[sub_id as usize]
                 .children
                 .iter()
@@ -547,7 +556,7 @@ mod tests {
         {
             let t = scanner.tree.read().unwrap();
             assert_eq!(t.stats.files, 1);
-            assert_eq!(t.stats.size, before + 1);
+            assert_eq!(file_bytes(&t), 4);
         }
 
         fs::remove_dir_all(&root).unwrap();
