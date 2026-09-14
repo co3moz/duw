@@ -979,3 +979,7 @@ button {
 .note {
   white-space: nowrap;
 }
+.note-mount {
+  white-space: normal;
+  text-align: right;
+}

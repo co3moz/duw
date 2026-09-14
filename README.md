@@ -68,7 +68,9 @@ duw [OPTIONS] [PATH]
   -p, --port <PORT>        Port to listen on (0 picks a free one)
       --host <HOST>        Address to bind [default: 127.0.0.1]
       --no-open            Do not open a browser window
-  -x, --one-file-system    Skip directories on other filesystems (Unix only)
+  -x, --one-file-system    Skip directories on other filesystems (Unix only).
+                           When a scan crosses onto one, duw points it out and
+                           suggests this flag.
   -L, --dereference        Follow symbolic links
   -l, --count-links        Count hard-linked files once per link
       --include-cloud      Include cloud placeholders such as OneDrive or

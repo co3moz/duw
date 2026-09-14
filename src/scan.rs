@@ -403,6 +403,7 @@ impl Scanner {
         let mut errors: Vec<(String, String)> = Vec::new();
         let mut skipped = 0u64;
         let mut hardlinks = 0u64;
+        let mut mounts: Vec<String> = Vec::new();
         let recurse = self.opts.max_depth.is_none_or(|max| depth < max);
 
         for de in rd {
@@ -472,9 +473,16 @@ impl Scanner {
             let filtered = cloud && self.opts.local_only;
 
             if kind == Kind::Dir {
-                if self.opts.one_file_system && fsext::device(&md) != self.root_device {
-                    skipped += 1;
-                    continue;
+                let cross = fsext::device(&md) != self.root_device;
+                if self.opts.one_file_system {
+                    if cross {
+                        skipped += 1;
+                        continue;
+                    }
+                } else if cross {
+                    // The user did not ask to stay on one filesystem, so this
+                    // directory is walked; remember it for the "-x" hint.
+                    mounts.push(child.display().to_string());
                 }
                 if recurse && !filtered {
                     subdirs.push(child);
@@ -522,6 +530,9 @@ impl Scanner {
             let ids = t.add_children(id, entries);
             t.stats.skipped += skipped;
             t.stats.hardlinks += hardlinks;
+            for p in mounts {
+                t.record_mount(p);
+            }
             for (p, m) in errors {
                 t.record_error(p, m);
             }

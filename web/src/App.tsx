@@ -601,6 +601,7 @@ export default function App() {
         {state.platform.approximate_alloc && metric === 'alloc' && (
           <span className="note">* on-disk sizes are rounded to the cluster size</span>
         )}
+        {progress?.mount_note && <span className="note note-mount">{progress.mount_note}</span>}
         {!state.platform.hardlink_dedup && <span className="note">hard links counted once per link</span>}
       </footer>
 

@@ -91,6 +91,10 @@ pub struct Tree {
     /// Directory the scanner most recently finished reading.
     pub current: String,
     pub errors: Vec<ScanError>,
+    /// Directories found on another filesystem, kept for the "-x" hint.
+    pub mounts: Vec<String>,
+    /// How many such directories were seen, including ones past the cap.
+    pub mount_count: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -100,6 +104,8 @@ pub struct ScanError {
 }
 
 const MAX_KEPT_ERRORS: usize = 200;
+/// Mount paths kept for the hint; the count still reports the rest.
+const MAX_KEPT_MOUNTS: usize = 4;
 
 impl Tree {
     pub fn new(root_name: String, size: u64, alloc: u64, mtime: i64) -> Self {
@@ -130,7 +136,43 @@ impl Tree {
             stats: Stats::default(),
             current: String::new(),
             errors: Vec::new(),
+            mounts: Vec::new(),
+            mount_count: 0,
         }
+    }
+
+    /// Remembers a directory that lives on another filesystem so the UI and
+    /// the CLI can suggest `-x` when the scan was not limited to one device.
+    pub fn record_mount(&mut self, path: String) {
+        if self.mounts.contains(&path) {
+            return;
+        }
+        self.mount_count += 1;
+        if self.mounts.len() < MAX_KEPT_MOUNTS {
+            self.mounts.push(path);
+        }
+    }
+
+    /// A one-line `-x` suggestion, or `None` when the scan stayed on one
+    /// filesystem.
+    pub fn mount_note(&self) -> Option<String> {
+        if self.mount_count == 0 {
+            return None;
+        }
+        let (noun, verb, pronoun) = if self.mount_count == 1 {
+            ("directory", "is", "it")
+        } else {
+            ("directories", "are", "them")
+        };
+        let more = self.mount_count.saturating_sub(self.mounts.len() as u64);
+        let mut list = self.mounts.join(", ");
+        if more > 0 {
+            list.push_str(&format!(" and {more} more"));
+        }
+        Some(format!(
+            "{} {noun} {verb} on another filesystem ({list}); use -x to skip {pronoun}, or --exclude to leave some out",
+            self.mount_count
+        ))
     }
 
     fn intern_ext(&mut self, ext: &str) -> u32 {
@@ -1227,6 +1269,28 @@ mod tests {
         assert_ne!(new_dir, dir);
         assert_eq!(t.find_rel_path("sub"), Some(new_dir));
         assert_eq!(t.find_rel_path("sub/a"), Some(new_file));
+    }
+
+    #[test]
+    fn mount_note_suggests_x_only_when_mounts_were_seen() {
+        let mut t = Tree::new("root".into(), 0, 0, 0);
+        assert!(t.mount_note().is_none());
+
+        t.record_mount("/mnt/c".into());
+        t.record_mount("/mnt/c".into());
+        assert_eq!(t.mount_count, 1);
+        let note = t.mount_note().unwrap();
+        assert!(note.contains("1 directory is"));
+        assert!(note.contains("/mnt/c"));
+
+        for i in 0..10 {
+            t.record_mount(format!("/mnt/m{i}"));
+        }
+        assert_eq!(t.mount_count, 11);
+        assert_eq!(t.mounts.len(), 4);
+        let note = t.mount_note().unwrap();
+        assert!(note.contains("11 directories are"));
+        assert!(note.contains("and 7 more"));
     }
 
     #[test]

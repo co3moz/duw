@@ -87,6 +87,8 @@ struct Progress {
     root_size: u64,
     root_alloc: u64,
     dupes: DupeProgress,
+    /// `-x` suggestion when the walk crossed onto another filesystem.
+    mount_note: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -125,6 +127,7 @@ fn progress_of(state: &AppState) -> Progress {
         root_size: root.total_size,
         root_alloc: root.total_alloc,
         dupes: state.dupes.progress(),
+        mount_note: t.mount_note(),
     }
 }
 

@@ -53,6 +53,8 @@ export interface Progress {
   root_size: number
   root_alloc: number
   dupes: DupeProgress
+  /** `-x` suggestion when the walk crossed onto another filesystem. */
+  mount_note: string | null
 }
 
 export interface Platform {

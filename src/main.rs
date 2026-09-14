@@ -82,6 +82,7 @@ fn run() -> Result<(), String> {
         } else {
             scanner.run();
         }
+        print_mount_hint(&scanner);
         return print_report(&scanner, &root, &args);
     }
 
@@ -113,6 +114,7 @@ fn run() -> Result<(), String> {
             } else {
                 worker.run();
             }
+            print_mount_hint(&worker);
             // Duplicate detection needs the whole tree, so it waits for the
             // walk rather than racing it.
             if let Some(min) = auto_dupes {
@@ -200,6 +202,14 @@ fn build_excludes(args: &Args) -> Result<Option<globset::GlobSet>, String> {
 
 /// Grace period before a stuck connection stops being the process's problem.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+
+/// Points out directories on another filesystem when the walk was not limited
+/// with `-x`, so the user can skip them (`/mnt/c` in WSL is the usual case).
+fn print_mount_hint(scanner: &Scanner) {
+    if let Some(note) = scanner.tree.read().unwrap().mount_note() {
+        eprintln!("duw: {note}");
+    }
+}
 
 async fn shutdown(streams: tokio::sync::watch::Sender<bool>) {
     let _ = tokio::signal::ctrl_c().await;
