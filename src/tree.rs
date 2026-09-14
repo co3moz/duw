@@ -431,6 +431,24 @@ impl Tree {
         parts.join("/")
     }
 
+    /// Resolves a `/`-separated path relative to the root to its node, if it
+    /// still exists. The inverse of [`Tree::rel_path`], so results can be
+    /// re-targeted after a rescan replaced a subtree's node ids.
+    pub fn find_rel_path(&self, rel: &str) -> Option<u32> {
+        let mut cur = ROOT;
+        for part in rel.split('/').filter(|p| !p.is_empty()) {
+            let n = &self.nodes[cur as usize];
+            if n.kind != Kind::Dir {
+                return None;
+            }
+            cur = *n
+                .children
+                .iter()
+                .find(|&&c| self.nodes[c as usize].name.as_ref() == part)?;
+        }
+        self.get(cur).map(|_| cur)
+    }
+
     fn ext_name(&self, ext: u32) -> Option<&str> {
         if ext == NO_EXT {
             None
@@ -1187,6 +1205,28 @@ mod tests {
         assert_eq!(t.nodes[ROOT as usize].total_alloc, 15);
         assert_eq!(t.nodes[dir as usize].mtime, 123);
         assert_eq!(t.stats.size, 13);
+    }
+
+    #[test]
+    fn find_rel_path_targets_the_rebuilt_subtree() {
+        let mut t = Tree::new("root".into(), 0, 0, 0);
+        let dir = t.add_children(ROOT, vec![entry("sub", Kind::Dir, 4)])[0];
+        t.add_children(dir, vec![entry("a", Kind::File, 10)]);
+        let file = t.nodes[dir as usize].children[0];
+        assert_eq!(t.find_rel_path(""), Some(ROOT));
+        assert_eq!(t.find_rel_path("sub"), Some(dir));
+        assert_eq!(t.find_rel_path("sub/a"), Some(file));
+        assert_eq!(t.find_rel_path("missing"), None);
+        assert_eq!(t.find_rel_path("sub/missing"), None);
+
+        // A rebuilt subtree gets new ids, but the path resolves to them.
+        assert!(t.reset_children(ROOT));
+        let new_dir = t.add_children(ROOT, vec![entry("sub", Kind::Dir, 4)])[0];
+        t.add_children(new_dir, vec![entry("a", Kind::File, 10)]);
+        let new_file = t.nodes[new_dir as usize].children[0];
+        assert_ne!(new_dir, dir);
+        assert_eq!(t.find_rel_path("sub"), Some(new_dir));
+        assert_eq!(t.find_rel_path("sub/a"), Some(new_file));
     }
 
     #[test]

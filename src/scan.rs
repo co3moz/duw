@@ -104,8 +104,14 @@ impl Scanner {
 
     /// Re-walks one node in the background: a directory gets its children
     /// replaced, a file is merely re-stat'ed. Returns false when another walk
-    /// owns the scanner.
-    pub fn rescan(self: &Arc<Self>, id: u32, path: PathBuf) -> bool {
+    /// owns the scanner. `done` runs on the rescan thread once the tree has
+    /// been updated and before the scanner is marked idle again.
+    pub fn rescan(
+        self: &Arc<Self>,
+        id: u32,
+        path: PathBuf,
+        done: impl FnOnce() + Send + 'static,
+    ) -> bool {
         if !self.is_done() || self.busy.swap(true, Ordering::AcqRel) {
             return false;
         }
@@ -117,16 +123,16 @@ impl Scanner {
             .name("duw-rescan".into())
             .spawn(move || {
                 me.rescan_walk(id, &path);
-                me.finish_rescan();
+                me.finish_rescan(done);
             });
         if spawned.is_err() {
-            self.finish_rescan();
+            self.finish_rescan(|| {});
             return false;
         }
         true
     }
 
-    fn finish_rescan(&self) {
+    fn finish_rescan(&self, done: impl FnOnce()) {
         {
             let mut t = self.tree.write().unwrap();
             t.current.clear();
@@ -136,6 +142,7 @@ impl Scanner {
             self.final_ms
                 .fetch_add(start.elapsed().as_millis() as u64, Ordering::Relaxed);
         }
+        done();
         self.busy.store(false, Ordering::Release);
     }
 
@@ -516,7 +523,7 @@ mod tests {
         let before = scanner.tree.read().unwrap().stats.size;
 
         fs::write(sub.join("new.txt"), b"new!").unwrap();
-        assert!(scanner.rescan(sub_id, sub.clone()));
+        assert!(scanner.rescan(sub_id, sub.clone(), || {}));
         while scanner.is_busy() {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -533,7 +540,7 @@ mod tests {
         }
 
         fs::remove_file(sub.join("old.txt")).unwrap();
-        assert!(scanner.rescan(sub_id, sub.clone()));
+        assert!(scanner.rescan(sub_id, sub.clone(), || {}));
         while scanner.is_busy() {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }

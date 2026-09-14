@@ -548,6 +548,15 @@ async fn trash_node(
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// True when one `/`-separated path contains the other, so the two cannot
+/// describe disjoint subtrees.
+fn paths_overlap(a: &str, b: &str) -> bool {
+    let under = |parent: &str, child: &str| {
+        parent.is_empty() || child == parent || child.starts_with(&format!("{parent}/"))
+    };
+    under(a, b) || under(b, a)
+}
+
 /// Re-reads one entry from disk. Directories are walked again recursively,
 /// while files and links only get a fresh stat; an entry that vanished in the
 /// meantime is detached from the tree.
@@ -562,9 +571,53 @@ async fn rescan_node(
     let Some(path) = node_path(&state, id) else {
         return (StatusCode::NOT_FOUND, "no such node").into_response();
     };
-    // The old results describe a tree that is about to change.
+    // The ids a duplicate run points at live under the scope it was started
+    // from. Replacing the rescanned node's children gives them new ids, so a
+    // run that is running or done for an overlapping scope has to start over
+    // once the walk settles. Capture that before the invalidation below.
+    let restart = {
+        let p = state.dupes.progress();
+        let live = matches!(
+            p.phase,
+            Phase::Grouping | Phase::Windowing | Phase::Hashing | Phase::Done
+        );
+        let t = state.scanner.tree.read().unwrap();
+        let scope = t.rel_path(p.scope);
+        let node = t.rel_path(id);
+        (live && paths_overlap(&scope, &node)).then_some((scope, p.min_size))
+    };
+    // A worker reading a tree that is about to change would publish stale
+    // ids; stop it and drop whatever is already gone.
     state.dupes.forget_removed();
-    if !state.scanner.rescan(id, path) {
+    let tree = Arc::clone(&state.scanner.tree);
+    let dupes = Arc::clone(&state.dupes);
+    let after_walk = restart.clone();
+    if !state.scanner.rescan(id, path, move || {
+        let scope = after_walk.and_then(|(rel, min)| {
+            tree.read()
+                .unwrap()
+                .find_rel_path(&rel)
+                .map(|scope| (scope, min))
+        });
+        match scope {
+            Some((scope, min)) => {
+                dupes.start(scope, min);
+            }
+            None => dupes.forget_removed(),
+        }
+    }) {
+        // No walk will run, so resume the run this request stopped.
+        if let Some((scope, min)) = restart.and_then(|(rel, min)| {
+            state
+                .scanner
+                .tree
+                .read()
+                .unwrap()
+                .find_rel_path(&rel)
+                .map(|scope| (scope, min))
+        }) {
+            state.dupes.start(scope, min);
+        }
         return (StatusCode::CONFLICT, "a scan is still running").into_response();
     }
     StatusCode::ACCEPTED.into_response()
@@ -931,6 +984,156 @@ mod tests {
         );
         wait_idle(&f.state.scanner).await;
         assert_eq!(f.state.scanner.tree.read().unwrap().stats.files, 0);
+    }
+
+    #[tokio::test]
+    async fn rescan_drops_duplicate_results_for_replaced_nodes() {
+        let f = Fixture::new(true);
+        std::fs::write(f.root.join("a.txt"), b"same").unwrap();
+        std::fs::write(f.root.join("b.txt"), b"same").unwrap();
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/rescan/0")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router(f.state.clone())
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        wait_idle(&f.state.scanner).await;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/duplicates/0?min=1")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router(f.state.clone())
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        wait_dupes_done(&f.state.dupes).await;
+        assert_eq!(f.state.dupes.groups().len(), 1);
+
+        // Removing one copy and rescanning must refresh the run: the walk
+        // replaces every child id, and the old group has to go with it.
+        let generation = f.state.dupes.progress().generation;
+        std::fs::remove_file(f.root.join("b.txt")).unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/rescan/0")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router(f.state.clone())
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        wait_idle(&f.state.scanner).await;
+        wait_dupes_refresh(&f.state.dupes, generation).await;
+        assert!(f.state.dupes.groups().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rescan_refreshes_duplicate_results_against_new_ids() {
+        let f = Fixture::new(true);
+        std::fs::write(f.root.join("a.txt"), b"same").unwrap();
+        std::fs::write(f.root.join("b.txt"), b"same").unwrap();
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/rescan/0")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router(f.state.clone())
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        wait_idle(&f.state.scanner).await;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/duplicates/0?min=1")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router(f.state.clone())
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        wait_dupes_done(&f.state.dupes).await;
+
+        // Rescanning without touching the files still replaces their ids; the
+        // results have to come back on the new ones instead of going empty.
+        let generation = f.state.dupes.progress().generation;
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/rescan/0")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router(f.state.clone())
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        wait_idle(&f.state.scanner).await;
+        wait_dupes_refresh(&f.state.dupes, generation).await;
+
+        let tree = f.state.scanner.tree.read().unwrap();
+        let groups = f.state.dupes.groups();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].files.len(), 2);
+        for file in &groups[0].files {
+            assert!(
+                tree.get(file.id).is_some(),
+                "stale id {} for {}",
+                file.id,
+                file.path
+            );
+        }
+    }
+
+    async fn wait_dupes_done(dupes: &Dupes) {
+        for _ in 0..200 {
+            if dupes.progress().phase == Phase::Done {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("duplicate scan never finished");
+    }
+
+    /// Waits for a run newer than `generation` to settle.
+    async fn wait_dupes_refresh(dupes: &Dupes, generation: u64) {
+        for _ in 0..200 {
+            let p = dupes.progress();
+            if p.generation > generation && p.phase == Phase::Done {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("duplicate scan never refreshed");
     }
 
     #[tokio::test]

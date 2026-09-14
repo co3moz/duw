@@ -19,6 +19,8 @@ export interface DupeProgress {
   scope: number
   min_size: number
   candidates: number
+  /** Files whose metadata has been refreshed so far while grouping. */
+  checked: number
   read: number
   bytes_read: number
   bytes_total: number

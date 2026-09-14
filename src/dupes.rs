@@ -30,6 +30,9 @@ const WINDOW: u64 = 16 * 1024;
 /// At or below this size the window stage is pointless, so hash the whole file.
 const SMALL_FILE: u64 = 64 * 1024;
 const READ_BUF: usize = 256 * 1024;
+/// Candidates refreshed per parallel batch in stage 1; small enough that a
+/// cancel is noticed quickly, large enough to keep every core busy.
+const STAT_BATCH: usize = 8 * 1024;
 
 pub type Digest = [u8; 32];
 
@@ -52,6 +55,8 @@ pub struct DupeProgress {
     pub min_size: u64,
     /// Files that survived the size grouping.
     pub candidates: u64,
+    /// Files whose metadata has been refreshed so far while grouping.
+    pub checked: u64,
     pub read: u64,
     pub bytes_read: u64,
     pub bytes_total: u64,
@@ -70,6 +75,7 @@ impl Default for DupeProgress {
             scope: 0,
             min_size: 0,
             candidates: 0,
+            checked: 0,
             read: 0,
             bytes_read: 0,
             bytes_total: 0,
@@ -214,7 +220,9 @@ impl Dupes {
 
     /// Returns false when the run was superseded or cancelled.
     fn work(&self, scope: u32, min_size: u64, generation: u64, started: Instant) -> bool {
-        // Refresh sizes before grouping: the filesystem can change after the walk.
+        // Refresh sizes before grouping: the filesystem can change after the
+        // walk. This is the one pass over every file, so it runs in parallel
+        // batches instead of costing the run's whole budget on one thread.
         let candidates = {
             let t = self.tree.read().unwrap();
             t.duplicate_candidates(scope, 1)
@@ -223,20 +231,36 @@ impl Dupes {
             return false;
         }
 
-        let mut by_size: HashMap<u64, Vec<Candidate>> = HashMap::new();
-        for mut c in candidates {
+        let mut refreshed: Vec<(u64, Candidate)> = Vec::new();
+        let mut remaining = candidates;
+        let mut checked = 0u64;
+        while !remaining.is_empty() {
             if self.stale(generation) {
                 return false;
             }
-            let path = self.path_of(&c);
-            let Ok(md) = std::fs::metadata(&path) else {
-                continue;
-            };
-            if !md.is_file() || fsext::is_cloud_backed(&md, &path) || md.len() < min_size.max(1) {
-                continue;
-            }
-            c.size = md.len();
-            by_size.entry(c.size).or_default().push(c);
+            let cut = remaining.len().saturating_sub(STAT_BATCH);
+            let batch = remaining.split_off(cut);
+            let batch_len = batch.len() as u64;
+            refreshed.par_extend(batch.into_par_iter().filter_map(|mut c| {
+                let path = self.path_of(&c);
+                let md = std::fs::metadata(&path).ok()?;
+                if !md.is_file() || fsext::is_cloud_backed(&md, &path) || md.len() < min_size.max(1)
+                {
+                    return None;
+                }
+                c.size = md.len();
+                Some((c.size, c))
+            }));
+            checked += batch_len;
+            self.update(generation, |p| p.checked = checked);
+        }
+        if self.stale(generation) {
+            return false;
+        }
+
+        let mut by_size: HashMap<u64, Vec<Candidate>> = HashMap::new();
+        for (size, c) in refreshed {
+            by_size.entry(size).or_default().push(c);
         }
         by_size.retain(|_, group| group.len() > 1);
 
@@ -511,6 +535,16 @@ mod tests {
         }
         f.run(6);
         assert_eq!(f.dupes.groups()[0].size, 6);
+    }
+
+    #[test]
+    fn progress_counts_checked_files_while_grouping() {
+        let f = Fixture::new();
+        f.run(1);
+        let p = f.dupes.progress();
+        // Both files were refreshed before the size groups were published.
+        assert_eq!(p.checked, 2);
+        assert_eq!(p.candidates, 2);
     }
 
     #[test]

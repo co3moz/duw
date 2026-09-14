@@ -92,8 +92,16 @@ export function Duplicates({
       {running && (
         <div className="dupes-progress">
           <div className="dupes-phase">
-            {PHASE_LABEL[progress.phase]} · {count(progress.candidates)} candidates ·{' '}
-            {count(progress.read)} files read
+            {progress.phase === 'grouping' ? (
+              <>
+                {PHASE_LABEL.grouping} · {count(progress.checked)} files checked
+              </>
+            ) : (
+              <>
+                {PHASE_LABEL[progress.phase]} · {count(progress.candidates)} candidates ·{' '}
+                {count(progress.read)} files read
+              </>
+            )}
           </div>
           <div className="bar">
             <div

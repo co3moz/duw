@@ -540,7 +540,7 @@ export default function App() {
                 minSize={effectiveMin}
                 scopeName={view.name}
                 matchesScope={dupes.scope === nodeId && dupes.phase !== 'idle'}
-                onMinSize={runDupes}
+                onMinSize={(value) => setMinSize(value)}
                 onScan={() => runDupes(effectiveMin)}
                 onCancel={() => api.cancelDuplicates()}
                 onMenu={openMenu}

@@ -715,6 +715,10 @@ button {
 .dupe-files .row-menu {
   flex: none;
 }
+.dupe-files li:hover .row-menu,
+.dupe-files .row-menu:focus-visible {
+  opacity: 1;
+}
 
 /* ---------- treemap ---------- */
 
