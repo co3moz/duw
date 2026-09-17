@@ -7,6 +7,7 @@ import { Treemap } from './components/Treemap'
 import { FolderRows, LargestRows, ListHeader, SearchRows, TypeRows } from './components/Rows'
 import { Duplicates, DUPE_RUNNING_PHASES } from './components/Duplicates'
 import { Snapshots } from './components/Snapshots'
+import { VolumeDialog } from './components/VolumeDialog'
 
 type Tab = 'folders' | 'types' | 'largest' | 'duplicates' | 'snapshots'
 
@@ -39,9 +40,17 @@ export default function App() {
   const [listWidth, setListWidth] = useState<number | null>(null)
   const dragging = useRef(false)
   const [menu, setMenu] = useState<{ id: number; name: string; x: number; y: number } | null>(null)
+  const [warn, setWarn] = useState<{
+    id: number
+    name: string
+    path: string | null
+    x: number
+    y: number
+  } | null>(null)
   const [filters, setFilters] = useState({ q: '', ext: '', min: '', max: '', age: '' })
   const [sort, setSort] = useState<{ key: SortKey; asc: boolean }>({ key: 'size', asc: false })
   const [heat, setHeat] = useState(false)
+  const [showVolumes, setShowVolumes] = useState(false)
 
   const onSort = useCallback((key: SortKey) => {
     setSort((cur) => (cur.key === key ? { key, asc: !cur.asc } : { key, asc: key === 'name' }))
@@ -219,6 +228,17 @@ export default function App() {
     setMenu({ id, name, x: e.clientX, y: e.clientY })
   }, [])
 
+  // Explains what a directory on another filesystem means and how to skip it.
+  const openWarn = useCallback((id: number, name: string, e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setWarn({ id, name, path: null, x: e.clientX, y: e.clientY })
+    api
+      .abs(id)
+      .then(({ path }) => setWarn((cur) => (cur && cur.id === id ? { ...cur, path } : cur)))
+      .catch(() => {})
+  }, [])
+
   const revealEntry = useCallback(async (id: number) => {
     const res = await api.reveal(id)
     if (!res.ok) window.alert(`could not open the file manager: ${await res.text()}`)
@@ -263,12 +283,14 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (showVolumes) return
       const el = e.target as HTMLElement | null
       const typing =
         !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
-      if (e.key === 'Escape' && menu) {
+      if (e.key === 'Escape' && (menu || warn)) {
         e.preventDefault()
         setMenu(null)
+        setWarn(null)
         return
       }
       if (typing) return
@@ -303,7 +325,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [up, menu, visible, selected, open])
+  }, [up, menu, warn, visible, selected, open, showVolumes])
 
   // Keep the keyboard selection on screen when it moves past the fold.
   useEffect(() => {
@@ -349,6 +371,15 @@ export default function App() {
             ))}
           </nav>
           <div className="head-actions">
+            <button
+              className="volume-trigger"
+              title="Disk capacity, mounted volumes and scanned file categories"
+              aria-haspopup="dialog"
+              onClick={() => setShowVolumes(true)}
+            >
+              <svg width="15" height="15" viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="3" width="16" height="14" rx="3" fill="none" stroke="currentColor" strokeWidth="1.4" /><path d="M2 12h16" stroke="currentColor" strokeWidth="1.4" /><circle cx="14.5" cy="14.5" r="1" fill="currentColor" /></svg>
+              disks
+            </button>
             <div className="toggle" role="group" aria-label="Size metric">
               <button
                 className={metric === 'size' ? 'on' : ''}
@@ -512,6 +543,7 @@ export default function App() {
                   onOpen={open}
                   onUp={view.breadcrumb.length > 1 ? up : undefined}
                   onMenu={openMenu}
+                  onWarn={openWarn}
                   age={heat}
                 />
               ))}
@@ -601,9 +633,10 @@ export default function App() {
         {state.platform.approximate_alloc && metric === 'alloc' && (
           <span className="note">* on-disk sizes are rounded to the cluster size</span>
         )}
-        {progress?.mount_note && <span className="note note-mount">{progress.mount_note}</span>}
         {!state.platform.hardlink_dedup && <span className="note">hard links counted once per link</span>}
       </footer>
+
+      {showVolumes && <VolumeDialog approximate={state.platform.approximate_alloc} onDismiss={() => setShowVolumes(false)} />}
 
       {menu && (
         <>
@@ -661,6 +694,35 @@ export default function App() {
               }}
             >
               Move to trash
+            </button>
+          </div>
+        </>
+      )}
+
+      {warn && (
+        <>
+          <div className="menu-backdrop" onClick={() => setWarn(null)} />
+          <div
+            className="warn-pop"
+            role="dialog"
+            aria-label={`${warn.name} is on another filesystem`}
+            style={{
+              left: Math.max(8, Math.min(warn.x, window.innerWidth - 372)),
+              top: Math.max(8, Math.min(warn.y, window.innerHeight - 210)),
+            }}
+          >
+            <div className="warn-title">⚠ On another filesystem</div>
+            <p>
+              <strong>{warn.name}</strong> is a mount from another disk
+              {warn.path ? ` (${warn.path})` : ''}, so its bytes count toward the totals while
+              they live outside this filesystem.
+            </p>
+            <p>
+              Start duw with <code>-x</code> to skip every such folder, or add{' '}
+              <code>--exclude {warn.path ?? warn.name}</code> to leave just this one out.
+            </p>
+            <button className="warn-close" onClick={() => setWarn(null)}>
+              close
             </button>
           </div>
         </>

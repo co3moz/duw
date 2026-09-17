@@ -49,6 +49,10 @@ cargo install duw
   whole folder in view and the treemap narrows with it.
 - **Age map**: colour by how long since each entry was modified, from green
   (touched recently) to red (untouched for years).
+- **Disks**: the header button opens mounted volume details: capacity, used and
+  available space, filesystem, mount point and disk type. A 3D pie chart shows
+  how the scanned root fits into each volume, with a separate view of scanned
+  file categories. Unscanned used space stays separate; no extra scan is run.
 - **Actions**: right-click an entry (or use the ⋯ button) to rescan it, reveal
   it in the file manager, copy its path, or move it to the trash. A rescan
   re-reads that entry from disk, so files added or removed elsewhere show up

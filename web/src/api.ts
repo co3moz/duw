@@ -53,8 +53,6 @@ export interface Progress {
   root_size: number
   root_alloc: number
   dupes: DupeProgress
-  /** `-x` suggestion when the walk crossed onto another filesystem. */
-  mount_note: string | null
 }
 
 export interface Platform {
@@ -85,6 +83,8 @@ export interface Entry {
   err: boolean
   /// Hidden because the bytes live in the cloud, not on this disk.
   cloud: boolean
+  /** Directory on another filesystem than the scan root. */
+  foreign: boolean
   ext: string | null
 }
 
@@ -161,6 +161,29 @@ export interface ExtStat {
   count: number
 }
 
+export interface Volume {
+  name: string
+  mount_point: string
+  file_system: string
+  kind: string
+  removable: boolean
+  total: number
+  available: number
+  used: number
+  contains_root: boolean
+  scanned_size: number
+  scanned_alloc: number
+  types: ExtStat[]
+}
+
+export interface VolumeSummary {
+  volumes: Volume[]
+  root: string
+  scanning: boolean
+  version: number
+  unattributed_alloc: number
+}
+
 export interface LargeFile {
   id: number
   path: string
@@ -231,6 +254,8 @@ async function get<T>(url: string, signal?: AbortSignal): Promise<T> {
 
 export const api = {
   state: (signal?: AbortSignal) => get<FullState>('/api/state', signal),
+
+  volumes: (signal?: AbortSignal) => get<VolumeSummary>('/api/volumes', signal),
 
   node: (id: number, metric: Metric, limit: number, sort: SortKey, asc: boolean, signal?: AbortSignal) =>
     get<NodeView>(

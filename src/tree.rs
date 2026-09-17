@@ -46,6 +46,9 @@ pub struct Node {
     pub removed: bool,
     /// Filtered out as cloud-backed: its bytes live in the cloud, not here.
     pub cloud: bool,
+    /// Directory on a different filesystem than the scan root (`/mnt/c` in
+    /// WSL): counted here, but by another disk.
+    pub foreign: bool,
     pub children: Vec<u32>,
 }
 
@@ -68,6 +71,7 @@ pub struct NewEntry {
     pub mtime: i64,
     pub err: bool,
     pub cloud: bool,
+    pub foreign: bool,
 }
 
 #[derive(Default, Clone, Serialize)]
@@ -126,6 +130,7 @@ impl Tree {
             err: false,
             removed: false,
             cloud: false,
+            foreign: false,
             children: Vec::new(),
         };
         Tree {
@@ -237,6 +242,7 @@ impl Tree {
                 err: e.err,
                 removed: false,
                 cloud: e.cloud,
+                foreign: e.foreign,
                 children: Vec::new(),
             });
         }
@@ -513,6 +519,7 @@ impl Tree {
             read: n.read,
             err: n.err,
             cloud: n.cloud,
+            foreign: n.foreign,
             ext: self.ext_name(n.ext).map(|s| s.to_string()),
         }
     }
@@ -884,6 +891,8 @@ pub struct Entry {
     pub read: bool,
     pub err: bool,
     pub cloud: bool,
+    /// Directory on another filesystem than the scan root.
+    pub foreign: bool,
     pub ext: Option<String>,
 }
 
@@ -1347,6 +1356,7 @@ mod tests {
             mtime: 0,
             err: false,
             cloud: false,
+            foreign: false,
         }
     }
 

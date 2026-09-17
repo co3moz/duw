@@ -25,6 +25,25 @@ const value = (o: { size: number; alloc: number }, m: Metric) => (m === 'alloc' 
 /** Opens the per-entry action menu at the pointer. */
 export type MenuHandler = (id: number, name: string, e: React.MouseEvent) => void
 
+/** Opens the explanation for a directory on another filesystem. */
+export type WarnHandler = (id: number, name: string, e: React.MouseEvent) => void
+
+function WarnButton({ id, name, onWarn }: { id: number; name: string; onWarn: WarnHandler }) {
+  return (
+    <button
+      className="row-warn"
+      title="This folder is on another filesystem"
+      aria-label={`Filesystem details for ${name}`}
+      onClick={(ev) => {
+        ev.stopPropagation()
+        onWarn(id, name, ev)
+      }}
+    >
+      ⚠
+    </button>
+  )
+}
+
 function MenuButton({ id, name, onMenu }: { id: number; name: string; onMenu: MenuHandler }) {
   return (
     <button
@@ -101,6 +120,7 @@ export function FolderRows({
   onOpen,
   onUp,
   onMenu,
+  onWarn,
   age,
 }: {
   entries: Entry[]
@@ -113,6 +133,7 @@ export function FolderRows({
   /// Absent at the scan root, where there is nowhere to go up to.
   onUp?: () => void
   onMenu?: MenuHandler
+  onWarn?: WarnHandler
   /** Colour bars by age instead of file type. */
   age?: boolean
 }) {
@@ -167,6 +188,7 @@ export function FolderRows({
             <Bar pct={percent(v, total)} color={age ? ageColor(e.mtime) : CATEGORY_COLOR[cat]} />
             <span className="row-pct">{percent(v, total).toFixed(1)}%</span>
             <span className="row-size">{bytes(v)}</span>
+            {e.foreign && onWarn && <WarnButton id={e.id} name={e.name} onWarn={onWarn} />}
             {onMenu && <MenuButton id={e.id} name={e.name} onMenu={onMenu} />}
           </li>
         )

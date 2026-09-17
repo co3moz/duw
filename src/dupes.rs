@@ -565,6 +565,7 @@ mod tests {
                 mtime: 0,
                 err: false,
                 cloud: false,
+                foreign: false,
             };
             let dir = tree.add_children(ROOT, vec![entry("sub", Kind::Dir, 0)])[0];
             tree.add_children(

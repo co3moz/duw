@@ -8,6 +8,7 @@ mod scan;
 mod server;
 mod snapshots;
 mod tree;
+mod volumes;
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -114,7 +115,6 @@ fn run() -> Result<(), String> {
             } else {
                 worker.run();
             }
-            print_mount_hint(&worker);
             // Duplicate detection needs the whole tree, so it waits for the
             // walk rather than racing it.
             if let Some(min) = auto_dupes {

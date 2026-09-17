@@ -29,6 +29,7 @@ use crate::tree::{
     Crumb, Entry, ExtStat, LargeFile, Rollup, SearchFilter, SearchHit, SortKey, Stats, SubtreeNode,
     ROOT,
 };
+use crate::volumes;
 
 const DEFAULT_LIMIT: usize = 400;
 const MAX_LIMIT: usize = 5000;
@@ -51,6 +52,7 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/state", get(state_handler))
+        .route("/api/volumes", get(volume_summary))
         .route("/api/events", get(events))
         .route("/api/node/{id}", get(node))
         .route("/api/tree/{id}", get(subtree))
@@ -87,8 +89,6 @@ struct Progress {
     root_size: u64,
     root_alloc: u64,
     dupes: DupeProgress,
-    /// `-x` suggestion when the walk crossed onto another filesystem.
-    mount_note: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -127,7 +127,6 @@ fn progress_of(state: &AppState) -> Progress {
         root_size: root.total_size,
         root_alloc: root.total_alloc,
         dupes: state.dupes.progress(),
-        mount_note: t.mount_note(),
     }
 }
 
@@ -145,6 +144,27 @@ async fn state_handler(State(state): State<AppState>) -> Json<FullState> {
         dupes_min: state.dupes_min,
         progress: progress_of(&state),
     })
+}
+
+async fn volume_summary(State(state): State<AppState>) -> Response {
+    // OS queries and scan aggregation stay off the async runtime. This work is
+    // requested only by the popup, never by the regular progress stream.
+    match tokio::task::spawn_blocking(move || {
+        let inventory = volumes::inventory();
+        let tree = state.scanner.tree.read().unwrap();
+        let mut summary = volumes::summarize(&tree, std::path::Path::new(&state.root), inventory);
+        summary.scanning = state.scanner.is_busy();
+        summary
+    })
+    .await
+    {
+        Ok(summary) => Json(summary).into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot read volume information",
+        )
+            .into_response(),
+    }
 }
 
 async fn events(
@@ -883,6 +903,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn volume_summary_balances_os_capacity_and_existing_scan() {
+        let f = Fixture::new(false);
+        std::fs::write(f.root.join("note.txt"), b"volume test").unwrap();
+        f.state.scanner.run();
+        let response = router(f.state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/volumes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(data["root"], f.state.root);
+        assert_eq!(data["scanning"], false);
+        let mut attributed = data["unattributed_alloc"].as_u64().unwrap();
+        let mut roots = 0;
+        for volume in data["volumes"].as_array().unwrap() {
+            assert_eq!(
+                volume["used"].as_u64().unwrap() + volume["available"].as_u64().unwrap(),
+                volume["total"].as_u64().unwrap()
+            );
+            assert!(volume.get("mount_path").is_none());
+            attributed += volume["scanned_alloc"].as_u64().unwrap();
+            roots += usize::from(volume["contains_root"].as_bool().unwrap());
+        }
+        assert!(roots <= 1);
+        assert_eq!(
+            attributed,
+            f.state.scanner.tree.read().unwrap().nodes[0].total_alloc
+        );
+    }
+
+    #[tokio::test]
     async fn all_mutations_reject_cross_site_requests() {
         let f = Fixture::new(true);
         for (method, path) in [
@@ -1154,6 +1213,7 @@ mod tests {
                     mtime: 0,
                     err: false,
                     cloud: false,
+                    foreign: false,
                 }],
             );
         }

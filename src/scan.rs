@@ -289,6 +289,7 @@ impl Scanner {
                 mtime: walk.now,
                 err: false,
                 cloud: false,
+                foreign: false,
             });
         }
         for (name, size) in &leaves {
@@ -301,6 +302,7 @@ impl Scanner {
                 mtime: walk.now - (walk.clock % 700) * 86_400,
                 err: false,
                 cloud: false,
+                foreign: false,
             });
         }
 
@@ -444,6 +446,7 @@ impl Scanner {
                         mtime: 0,
                         err: true,
                         cloud: false,
+                        foreign: false,
                     });
                     continue;
                 }
@@ -472,8 +475,8 @@ impl Scanner {
             };
             let filtered = cloud && self.opts.local_only;
 
+            let cross = kind == Kind::Dir && fsext::device(&md) != self.root_device;
             if kind == Kind::Dir {
-                let cross = fsext::device(&md) != self.root_device;
                 if self.opts.one_file_system {
                     if cross {
                         skipped += 1;
@@ -481,7 +484,8 @@ impl Scanner {
                     }
                 } else if cross {
                     // The user did not ask to stay on one filesystem, so this
-                    // directory is walked; remember it for the "-x" hint.
+                    // directory is walked; it is marked in the tree and listed
+                    // for the "use -x" hint.
                     mounts.push(child.display().to_string());
                 }
                 if recurse && !filtered {
@@ -498,6 +502,7 @@ impl Scanner {
                     mtime: fsext::mtime(&md),
                     err: false,
                     cloud: true,
+                    foreign: cross,
                 });
                 continue;
             }
@@ -522,6 +527,7 @@ impl Scanner {
                 mtime: fsext::mtime(&md),
                 err: false,
                 cloud,
+                foreign: cross,
             });
         }
 
