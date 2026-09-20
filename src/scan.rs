@@ -20,6 +20,7 @@ use crate::tree::{Kind, NewEntry, Tree, ROOT};
 pub struct ScanOpts {
     pub root: PathBuf,
     pub one_file_system: bool,
+    pub include_system_volumes: bool,
     pub dereference: bool,
     pub count_links: bool,
     pub max_depth: Option<u16>,
@@ -463,6 +464,14 @@ impl Scanner {
                 Kind::Other
             };
 
+            if kind == Kind::Dir
+                && !self.opts.include_system_volumes
+                && default_skipped_macos_volume(&child)
+            {
+                skipped += 1;
+                continue;
+            }
+
             // Cloud placeholders report their full size but occupy nothing
             // here. Files are always classified, whether or not the filter is
             // on, because the duplicate scanner must never read one: that
@@ -576,6 +585,20 @@ impl Scanner {
     }
 }
 
+/// macOS exposes internal APFS volumes here even when the user starts at `/`.
+/// `Data` is also exposed through firmlinks such as `/Users`, so walking it
+/// again through this path would count many files twice. An explicitly
+/// selected volume is the scan root and never reaches this child-entry filter.
+#[cfg(target_os = "macos")]
+fn default_skipped_macos_volume(path: &Path) -> bool {
+    path.parent() == Some(Path::new("/System/Volumes"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_skipped_macos_volume(_path: &Path) -> bool {
+    false
+}
+
 /// A readable label for the root node: the last path component, falling back to
 /// the whole path for drive roots such as `C:\`.
 fn display_root(path: &Path) -> String {
@@ -629,11 +652,32 @@ impl DemoWalk {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn default_macos_filter_only_skips_internal_volume_roots() {
+        assert!(default_skipped_macos_volume(Path::new(
+            "/System/Volumes/Preboot"
+        )));
+        assert!(default_skipped_macos_volume(Path::new(
+            "/System/Volumes/VM"
+        )));
+        assert!(default_skipped_macos_volume(Path::new(
+            "/System/Volumes/Data"
+        )));
+        assert!(!default_skipped_macos_volume(Path::new(
+            "/System/Volumes/Preboot/Cryptexes"
+        )));
+        assert!(!default_skipped_macos_volume(Path::new(
+            "/Volumes/External"
+        )));
+    }
+
     #[test]
     fn demo_walk_builds_the_synthetic_tree() {
         let scanner = Scanner::new_demo(ScanOpts {
             root: PathBuf::from("atlas-archive"),
             one_file_system: false,
+            include_system_volumes: false,
             dereference: false,
             count_links: false,
             max_depth: None,
@@ -659,6 +703,7 @@ mod tests {
         let scanner = Scanner::new(ScanOpts {
             root: root.clone(),
             one_file_system: false,
+            include_system_volumes: false,
             dereference: true,
             count_links: false,
             max_depth: None,
@@ -688,6 +733,7 @@ mod tests {
         let scanner = Scanner::new(ScanOpts {
             root: root.clone(),
             one_file_system: false,
+            include_system_volumes: false,
             dereference: false,
             count_links: false,
             max_depth: None,

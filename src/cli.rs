@@ -29,6 +29,10 @@ pub struct Args {
     #[arg(short = 'x', long)]
     pub one_file_system: bool,
 
+    /// Include macOS internal volumes under /System/Volumes when scanning an ancestor.
+    #[arg(long)]
+    pub include_system_volumes: bool,
+
     /// Follow symbolic links.
     #[arg(short = 'L', long)]
     pub dereference: bool,

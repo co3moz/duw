@@ -62,6 +62,7 @@ fn run() -> Result<(), String> {
     let opts = ScanOpts {
         root: root.clone(),
         one_file_system: args.one_file_system && fsext::ONE_FILE_SYSTEM_SUPPORTED,
+        include_system_volumes: args.include_system_volumes,
         dereference: args.dereference,
         count_links: args.count_links,
         max_depth: args.max_depth,

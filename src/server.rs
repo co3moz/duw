@@ -872,6 +872,7 @@ mod tests {
             let scanner = Scanner::new(ScanOpts {
                 root: root.clone(),
                 one_file_system: false,
+                include_system_volumes: false,
                 dereference: false,
                 count_links: false,
                 max_depth: None,

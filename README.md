@@ -75,6 +75,8 @@ duw [OPTIONS] [PATH]
   -x, --one-file-system    Skip directories on other filesystems (Unix only).
                            When a scan crosses onto one, duw points it out and
                            suggests this flag.
+      --include-system-volumes
+                           Include macOS internal volumes under /System/Volumes.
   -L, --dereference        Follow symbolic links
   -l, --count-links        Count hard-linked files once per link
       --include-cloud      Include cloud placeholders such as OneDrive or
@@ -91,6 +93,12 @@ duw [OPTIONS] [PATH]
       --top <N>            Print the N largest files to stdout instead of
                            serving the UI
 ```
+
+On macOS, scans started above `/System/Volumes` skip its internal volumes by
+default. This includes `Data`, whose files also appear through paths such as
+`/Users`; scanning both paths can count the same files twice. Scan an internal
+volume directly or pass `--include-system-volumes` to include them. `-x` still
+skips directories on other filesystems.
 
 ```bash
 duw --exclude '*/node_modules' --exclude '.git' ~/src
