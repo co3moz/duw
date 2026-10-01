@@ -80,11 +80,34 @@ fn request(address: &str, method: &str, path: &str) -> (u16, String) {
         .set_read_timeout(Some(std::time::Duration::from_secs(5)))
         .unwrap();
     write!(stream, "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    let (headers, body) = response.split_once("\r\n\r\n").unwrap();
-    let status = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
-    (status, body.to_string())
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    assert_ne!(
+        reader.read_line(&mut line).unwrap(),
+        0,
+        "missing status line"
+    );
+    let status = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+    let mut content_length = None;
+    loop {
+        line.clear();
+        assert_ne!(
+            reader.read_line(&mut line).unwrap(),
+            0,
+            "missing header end"
+        );
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = Some(value.trim().parse::<usize>().unwrap());
+            }
+        }
+    }
+    let mut body = vec![0; content_length.unwrap_or(0)];
+    reader.read_exact(&mut body).unwrap();
+    (status, String::from_utf8(body).unwrap())
 }
 
 fn get_json(address: &str, path: &str) -> serde_json::Value {
