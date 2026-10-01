@@ -659,4 +659,102 @@ mod tests {
         assert_eq!(f.dupes.progress().phase, Phase::Cancelled);
         assert!(hash_file(&f.root.join("sub/a"), 4, || true).is_none());
     }
+
+    #[test]
+    fn large_files_pass_through_window_and_full_hash_stages() {
+        let root =
+            std::env::temp_dir().join(format!("duw-dupes-large-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir(&root).unwrap();
+        let size = SMALL_FILE + 1024;
+        let data = vec![b'x'; size as usize];
+        std::fs::write(root.join("a.bin"), &data).unwrap();
+        std::fs::write(root.join("b.bin"), &data).unwrap();
+
+        let mut tree = Tree::new("root".into(), 0, 0, 0);
+        tree.add_children(
+            ROOT,
+            vec![
+                NewEntry {
+                    name: "a.bin".into(),
+                    kind: Kind::File,
+                    size,
+                    alloc: size,
+                    mtime: 0,
+                    err: false,
+                    cloud: false,
+                    foreign: false,
+                },
+                NewEntry {
+                    name: "b.bin".into(),
+                    kind: Kind::File,
+                    size,
+                    alloc: size,
+                    mtime: 0,
+                    err: false,
+                    cloud: false,
+                    foreign: false,
+                },
+            ],
+        );
+        let dupes = Dupes::new(Arc::new(RwLock::new(tree)), root.clone(), false);
+        let generation = dupes.progress().generation;
+        assert!(dupes.work(ROOT, 1, generation, Instant::now()));
+
+        let progress = dupes.progress();
+        assert_eq!(dupes.groups().len(), 1);
+        assert_eq!(progress.read, 4, "two window reads and two full reads");
+        assert_eq!(
+            progress.bytes_read,
+            2 * (WINDOW * 2 + size),
+            "window and full-hash byte counters should both be reported"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn demo_worker_groups_same_size_entries_without_reading_files() {
+        let mut tree = Tree::new("root".into(), 0, 0, 0);
+        tree.add_children(
+            ROOT,
+            vec![
+                NewEntry {
+                    name: "one.bin".into(),
+                    kind: Kind::File,
+                    size: 42,
+                    alloc: 42,
+                    mtime: 0,
+                    err: false,
+                    cloud: false,
+                    foreign: false,
+                },
+                NewEntry {
+                    name: "two.bin".into(),
+                    kind: Kind::File,
+                    size: 42,
+                    alloc: 42,
+                    mtime: 0,
+                    err: false,
+                    cloud: false,
+                    foreign: false,
+                },
+            ],
+        );
+        let dupes = Dupes::new(Arc::new(RwLock::new(tree)), PathBuf::from("demo"), true);
+        let generation = dupes.progress().generation;
+        assert!(dupes.work(ROOT, 1, generation, Instant::now()));
+        assert_eq!(dupes.groups().len(), 1);
+        assert_eq!(dupes.groups()[0].wasted, 42);
+        assert_eq!(dupes.progress().candidates, 2);
+    }
+
+    #[test]
+    fn hashers_drop_missing_or_size_changed_files() {
+        let f = Fixture::new();
+        let path = f.root.join("sub/a");
+        assert!(hash_windows(&path, 5).is_none());
+        assert!(hash_file(&path, 5, || false).is_none());
+        assert!(hash_file(&path, 4, || true).is_none());
+    }
 }

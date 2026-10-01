@@ -202,6 +202,26 @@ mod imp {
     pub const ONE_FILE_SYSTEM_SUPPORTED: bool = false;
     pub const HARDLINK_DEDUP_SUPPORTED: bool = false;
     pub const CLOUD_DETECTION_SUPPORTED: bool = true;
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn cloud_tag_matching_accepts_the_documented_range() {
+            assert!(is_cloud_tag(0x9000_001A));
+            assert!(is_cloud_tag(0x9000_F01A));
+            assert!(!is_cloud_tag(0x8000_001A));
+        }
+
+        #[test]
+        fn volume_root_and_reparse_lookup_handle_invalid_paths() {
+            assert_eq!(volume_root(Path::new(r"C:\folder")), Some("C:\\".into()));
+            assert_eq!(volume_root(Path::new("relative")), None);
+            assert!(reparse_tag(Path::new(r"C:\does-not-exist")).is_none());
+            init(Path::new("relative"));
+        }
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -269,5 +289,59 @@ mod tests {
         let backed = is_cloud_backed(&std::fs::metadata(&path).unwrap(), &path);
         let _ = std::fs::remove_file(&path);
         assert!(!backed);
+    }
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn metadata_helpers_handle_a_regular_file() {
+        let path = std::env::temp_dir().join(format!("duw-fsext-metadata-{}", std::process::id()));
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"hello").unwrap();
+        drop(file);
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        let (size, alloc) = sizes(&metadata);
+        assert_eq!(size, 5);
+        assert!(alloc > 0);
+        assert!(mtime(&metadata) >= 0);
+        assert!(!is_cloud_backed(&metadata, &path));
+        assert!(hardlink_key(&metadata).is_none());
+        let _ = device(&metadata);
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_hard_links_share_a_deduplication_key() {
+        let path = std::env::temp_dir().join(format!("duw-fsext-hardlink-{}", std::process::id()));
+        let link = path.with_extension("link");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&link);
+        std::fs::write(&path, b"hard link").unwrap();
+        std::fs::hard_link(&path, &link).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert!(hardlink_key(&metadata).is_some());
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(link).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_metadata_helpers_cover_non_placeholder_entries() {
+        let path = std::env::temp_dir().join(format!("duw-fsext-windows-{}", std::process::id()));
+        std::fs::write(&path, b"hello").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        init(&path);
+        assert!(sizes(&metadata).1 >= metadata.len());
+        assert_eq!(device(&metadata), 0);
+        assert!(hardlink_key(&metadata).is_none());
+        assert!(!is_cloud_backed(&metadata, &path));
+        std::fs::remove_file(path).unwrap();
     }
 }

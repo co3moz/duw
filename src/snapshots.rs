@@ -8,25 +8,45 @@
 //! the live tree is a linear merge that never builds a map.
 //!
 //! All integers in the body are LEB128 varints; the header is little-endian.
+//! Version 2 adds per-entry error, cloud and foreign-filesystem flags. The
+//! saved tree also includes directories (with a trailing `/`) and the root
+//! (an empty path). Version 1 and legacy JSON snapshots remain readable.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+
 use serde::{Deserialize, Serialize};
 
-use crate::tree::{FileInfo, FileSource, Kind, SortedFiles, Tree};
+use crate::tree::{FileInfo, FileSource, Kind, NewEntry, Tree, ROOT};
 
 /// Human-readable magic at the very start of every snapshot file.
 pub const MAGIC: [u8; 16] = *b"duw snapshot\0\0\0\0";
 /// Bumped whenever the table layout changes in a way readers must know about.
-pub const FORMAT_VERSION: u16 = 1;
+pub const FORMAT_VERSION: u16 = 2;
 /// Fixed part of the header; variable-length strings follow it.
 const HEADER_LEN: usize = 64;
 /// Refuses absurd path lengths early when a file is corrupt.
 const MAX_PATH: usize = 64 * 1024;
+
+#[cfg(test)]
+static TEST_DIR: OnceLock<PathBuf> = OnceLock::new();
+#[cfg(test)]
+static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    TEST_DIR.get_or_init(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".test-snapshots"));
+    TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Fixed-size part of the file, before the root and app-version strings.
 struct Header {
@@ -52,7 +72,7 @@ pub struct SnapshotMeta {
     pub root: String,
     pub created: u64,
     pub entries: u64,
-    /// Sum of the scanned file sizes the snapshot describes.
+    /// Sum of the saved entry sizes (older snapshots contain only files).
     pub bytes: u64,
     /// Size of the snapshot file itself on disk.
     pub file_bytes: u64,
@@ -96,6 +116,12 @@ pub struct DiffResult {
 
 /// Where snapshots live. Created on first use.
 pub fn dir() -> std::io::Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(test_dir) = TEST_DIR.get() {
+        std::fs::create_dir_all(test_dir)?;
+        return Ok(test_dir.clone());
+    }
+
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
     } else if cfg!(target_os = "macos") {
@@ -181,6 +207,117 @@ pub fn meta(name: &str) -> io::Result<SnapshotMeta> {
     meta_at(&path, name)
 }
 
+/// Restores a scan without consulting the scanned filesystem. Older snapshots
+/// have only file records; their parent directories are reconstructed with
+/// zero own sizes and unknown modification times.
+pub fn load(name: &str) -> io::Result<(SnapshotMeta, Tree)> {
+    let path = ensure(name)?;
+    load_at(&path, name)
+}
+
+fn load_at(path: &Path, name: &str) -> io::Result<(SnapshotMeta, Tree)> {
+    let mut reader = Reader::open_path(path)?;
+    let meta = SnapshotMeta::from_header(
+        name,
+        &reader.header,
+        reader.file.get_ref().metadata()?.len(),
+    );
+    let root_path = Path::new(&meta.root);
+    let root_name = root_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| meta.root.clone());
+    let mut tree = Tree::new(root_name.clone(), 0, 0, 0);
+    let mut nodes: HashMap<(u32, String), u32> = HashMap::new();
+    let mut previous: Option<String> = None;
+    let mut total_size = 0u64;
+    let mut total_alloc = 0u64;
+    while reader.advance_entry()? {
+        let path = reader.path();
+        if previous.as_deref().is_some_and(|prev| prev >= path) {
+            return Err(invalid("corrupt snapshot: paths are not strictly sorted"));
+        }
+        let info = reader.info();
+        total_size = total_size
+            .checked_add(info.size)
+            .ok_or_else(|| invalid("corrupt snapshot: size overflow"))?;
+        total_alloc = total_alloc
+            .checked_add(info.alloc)
+            .ok_or_else(|| invalid("corrupt snapshot: allocation overflow"))?;
+        if path.is_empty() {
+            if previous.is_some() || info.kind != Kind::Dir {
+                return Err(invalid("corrupt snapshot: invalid root record"));
+            }
+            tree = Tree::new(root_name.clone(), info.size, info.alloc, info.mtime);
+            tree.nodes[ROOT as usize].err = info.err;
+            tree.nodes[ROOT as usize].cloud = info.cloud;
+            tree.nodes[ROOT as usize].foreign = info.foreign;
+        } else {
+            let relative = if info.kind == Kind::Dir {
+                path.strip_suffix('/').unwrap_or(path)
+            } else {
+                path
+            };
+            let parts: Vec<&str> = relative.split('/').collect();
+            for part in &parts {
+                // Each component must remain a filename when node_path joins
+                // it to the saved root for rescan, reveal and trash actions.
+                let mut components = Path::new(part).components();
+                if part.is_empty()
+                    || part.contains('\0')
+                    || !matches!(components.next(), Some(std::path::Component::Normal(_)))
+                    || components.next().is_some()
+                    || (cfg!(windows) && part.contains(':'))
+                {
+                    return Err(invalid("corrupt snapshot: invalid relative path"));
+                }
+            }
+            let mut parent = ROOT;
+            for (index, part) in parts.iter().enumerate() {
+                let last = index + 1 == parts.len();
+                let key = (parent, (*part).to_string());
+                if let Some(&id) = nodes.get(&key) {
+                    if last || tree.nodes[id as usize].kind != Kind::Dir {
+                        return Err(invalid("corrupt snapshot: conflicting entries"));
+                    }
+                    parent = id;
+                    continue;
+                }
+                if tree.nodes.len() >= u32::MAX as usize {
+                    return Err(invalid("snapshot has too many entries"));
+                }
+                let id = tree.nodes.len() as u32;
+                tree.add_children(
+                    parent,
+                    vec![NewEntry {
+                        name: (*part).to_string(),
+                        kind: if last { info.kind } else { Kind::Dir },
+                        size: if last { info.size } else { 0 },
+                        alloc: if last { info.alloc } else { 0 },
+                        mtime: if last { info.mtime } else { 0 },
+                        err: last && info.err,
+                        cloud: last && info.cloud,
+                        foreign: last && info.foreign,
+                    }],
+                );
+                nodes.insert(key, id);
+                parent = id;
+            }
+        }
+        previous = Some(path.to_string());
+    }
+    if total_size != meta.bytes || total_alloc != reader.header.total_alloc {
+        return Err(invalid("corrupt snapshot: totals do not match"));
+    }
+    for node in &mut tree.nodes {
+        if node.kind == Kind::Dir {
+            node.read = true;
+        }
+    }
+    tree.version = 1;
+    Ok((meta, tree))
+}
+
 pub fn delete(name: &str) -> io::Result<()> {
     let binary = path_for(name, "duws")?;
     let legacy = path_for(name, "json")?;
@@ -231,7 +368,7 @@ pub fn list() -> std::io::Result<Vec<SnapshotMeta>> {
 pub fn diff(name: &str, live: &Tree, limit: usize) -> io::Result<DiffResult> {
     let path = ensure(name)?;
     let mut old = Reader::open_path(&path)?;
-    let mut new = SortedFiles::new(live);
+    let mut new = live.sorted_files();
     diff_sources(&mut old, &mut new, limit)
 }
 
@@ -425,6 +562,7 @@ struct Reader {
     path: String,
     suffix: Vec<u8>,
     info: FileInfo,
+    header: Header,
 }
 
 impl Reader {
@@ -436,6 +574,7 @@ impl Reader {
         Ok(Reader {
             file,
             remaining: header.entry_count,
+            header,
             path: String::new(),
             suffix: Vec::new(),
             info: FileInfo {
@@ -443,13 +582,13 @@ impl Reader {
                 size: 0,
                 alloc: 0,
                 mtime: 0,
+                err: false,
+                cloud: false,
+                foreign: false,
             },
         })
     }
-}
-
-impl FileSource for Reader {
-    fn advance(&mut self) -> io::Result<bool> {
+    fn advance_entry(&mut self) -> io::Result<bool> {
         if self.remaining == 0 {
             return Ok(false);
         }
@@ -467,19 +606,45 @@ impl FileSource for Reader {
             std::str::from_utf8(&self.suffix).map_err(|_| invalid("corrupt snapshot: bad path"))?;
         self.path.truncate(shared);
         self.path.push_str(suffix);
+        if self.path.len() > MAX_PATH {
+            return Err(invalid("corrupt snapshot: path too long"));
+        }
 
         let size = read_varint(&mut self.file)?;
         let alloc = read_varint(&mut self.file)?;
         let mtime = unzigzag(read_varint(&mut self.file)?);
         let kind = kind_from_byte(read_u8(&mut self.file)?);
+        let flags = if self.header.format_version >= 2 {
+            read_u8(&mut self.file)?
+        } else {
+            0
+        };
+        if flags & !7 != 0 {
+            return Err(invalid("corrupt snapshot: unknown entry flags"));
+        }
         self.info = FileInfo {
             kind,
             size,
             alloc,
             mtime,
+            err: flags & 1 != 0,
+            cloud: flags & 2 != 0,
+            foreign: flags & 4 != 0,
         };
         self.remaining -= 1;
         Ok(true)
+    }
+}
+
+impl FileSource for Reader {
+    fn advance(&mut self) -> io::Result<bool> {
+        // Diff remains file-only even when the snapshot also records folders.
+        while self.advance_entry()? {
+            if self.info.kind != Kind::Dir {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn path(&self) -> &str {
@@ -551,6 +716,9 @@ fn write_body(tmp: &Path, root: &str, created: u64, files: &mut dyn FileSource) 
         write_varint(&mut w, info.alloc)?;
         write_varint(&mut w, zigzag(info.mtime))?;
         w.write_all(&[kind_byte(info.kind)])?;
+        let flags =
+            u8::from(info.err) | (u8::from(info.cloud) << 1) | (u8::from(info.foreign) << 2);
+        w.write_all(&[flags])?;
         count += 1;
         total_size += info.size;
         total_alloc += info.alloc;
@@ -600,7 +768,7 @@ fn read_header<R: Read>(r: &mut R) -> io::Result<Header> {
         return Err(invalid("not a duw snapshot"));
     }
     let format_version = u16::from_le_bytes([buf[16], buf[17]]);
-    if format_version != FORMAT_VERSION {
+    if !(1..=FORMAT_VERSION).contains(&format_version) {
         return Err(invalid("unsupported snapshot format version"));
     }
     let root_len = u16::from_le_bytes([buf[56], buf[57]]) as usize;
@@ -748,6 +916,9 @@ impl FileSource for LegacyFiles {
             size: e.size,
             alloc: e.alloc,
             mtime: e.mtime,
+            err: false,
+            cloud: false,
+            foreign: false,
         }
     }
 }
@@ -771,6 +942,9 @@ fn migrate_legacy(path: &Path, name: &str) -> io::Result<SnapshotMeta> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
 
     fn entry(path: &str, size: u64) -> LegacyEntry {
         LegacyEntry {
@@ -784,6 +958,34 @@ mod tests {
 
     fn source(entries: Vec<LegacyEntry>) -> LegacyFiles {
         LegacyFiles { entries, next: 0 }
+    }
+
+    struct SnapshotGuard(String);
+
+    impl SnapshotGuard {
+        fn new() -> Self {
+            TEST_DIR
+                .get_or_init(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".test-snapshots"));
+            Self(format!(
+                "test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ))
+        }
+
+        fn name(&self) -> &str {
+            &self.0
+        }
+    }
+
+    impl Drop for SnapshotGuard {
+        fn drop(&mut self) {
+            let _ = delete(&self.0);
+            if let Ok(dir) = dir() {
+                let _ = std::fs::remove_file(dir.join(format!("{}.json", self.0)));
+                let _ = std::fs::remove_file(dir.join(format!("{}.duws.tmp", self.0)));
+            }
+        }
     }
 
     #[test]
@@ -874,5 +1076,314 @@ mod tests {
         assert!(!valid_name("a/b"));
         assert!(!valid_name(""));
         assert!(!valid_name(".."));
+    }
+
+    #[test]
+    fn loaded_snapshots_restore_the_full_tree_and_remain_file_diff_compatible() {
+        let _lock = test_lock();
+        let guard = SnapshotGuard::new();
+        let entry = |name: &str, kind, size| NewEntry {
+            name: name.into(),
+            kind,
+            size,
+            alloc: size * 2,
+            mtime: 77,
+            err: false,
+            cloud: false,
+            foreign: false,
+        };
+        let mut original = Tree::new("saved-root".into(), 3, 8, 70);
+        let dirs = original.add_children(
+            ROOT,
+            vec![
+                entry("a", Kind::Dir, 5),
+                entry("a.txt", Kind::File, 10),
+                entry("empty", Kind::Dir, 4),
+                entry("α", Kind::Dir, 6),
+            ],
+        );
+        original.add_children(dirs[0], vec![entry("nested.bin", Kind::File, 20)]);
+        original.add_children(dirs[2], vec![entry("β", Kind::Link, 7)]);
+        original.mark_read(dirs[1], false);
+        let cloud_id = original.find_rel_path("a/nested.bin").unwrap();
+        original.nodes[cloud_id as usize].cloud = true;
+        original.nodes[dirs[2] as usize].foreign = true;
+        original.nodes[dirs[1] as usize].err = true;
+        save(
+            guard.name(),
+            "saved-root",
+            42,
+            &mut original.sorted_entries(),
+        )
+        .unwrap();
+
+        let (meta, restored) = load(guard.name()).unwrap();
+        assert_eq!(meta.root, "saved-root");
+        assert_eq!(meta.bytes, original.nodes[ROOT as usize].total_size);
+        assert_eq!(meta.entries as usize, original.nodes.len());
+        assert_eq!(restored.stats.files, original.stats.files);
+        assert_eq!(restored.stats.dirs, original.stats.dirs);
+        assert_eq!(restored.stats.size, original.stats.size);
+        assert_eq!(restored.stats.alloc, original.stats.alloc);
+        for (id, expected) in original.nodes.iter().enumerate() {
+            let path = original.rel_path(id as u32);
+            let actual = &restored.nodes[restored.find_rel_path(&path).unwrap() as usize];
+            assert_eq!(actual.kind, expected.kind, "{path}");
+            assert_eq!(actual.self_size, expected.self_size, "{path}");
+            assert_eq!(actual.self_alloc, expected.self_alloc, "{path}");
+            assert_eq!(actual.total_size, expected.total_size, "{path}");
+            assert_eq!(actual.total_alloc, expected.total_alloc, "{path}");
+            assert_eq!(actual.files, expected.files, "{path}");
+            assert_eq!(actual.dirs, expected.dirs, "{path}");
+            assert_eq!(actual.mtime, expected.mtime, "{path}");
+            assert_eq!(actual.err, expected.err, "{path}");
+            assert_eq!(actual.cloud, expected.cloud, "{path}");
+            assert_eq!(actual.foreign, expected.foreign, "{path}");
+            if actual.kind == Kind::Dir {
+                assert!(actual.read, "{path}");
+            }
+        }
+        assert_eq!(
+            restored.by_extension(ROOT)[0].ext,
+            original.by_extension(ROOT)[0].ext
+        );
+        assert!(restored
+            .duplicate_candidates(ROOT, 1)
+            .iter()
+            .all(|c| c.path != "a/nested.bin"));
+        assert_eq!(diff(guard.name(), &restored, 100).unwrap().total_changes, 0);
+    }
+
+    #[test]
+    fn version_one_snapshots_load_with_reconstructed_parent_directories() {
+        let _lock = test_lock();
+        let guard = SnapshotGuard::new();
+        let mut bytes = Vec::new();
+        write_header(
+            &mut bytes,
+            &Header {
+                format_version: 1,
+                flags: 0,
+                created: 42,
+                entry_count: 1,
+                total_size: 8,
+                total_alloc: 16,
+                root: "old-root".into(),
+                app_version: "0.1.5".into(),
+            },
+        )
+        .unwrap();
+        let path = "nested/old.txt";
+        write_varint(&mut bytes, 0).unwrap();
+        write_varint(&mut bytes, path.len() as u64).unwrap();
+        bytes.extend_from_slice(path.as_bytes());
+        write_varint(&mut bytes, 8).unwrap();
+        write_varint(&mut bytes, 16).unwrap();
+        write_varint(&mut bytes, zigzag(77)).unwrap();
+        bytes.push(kind_byte(Kind::File));
+        std::fs::write(path_for(guard.name(), "duws").unwrap(), bytes).unwrap();
+
+        let (_, restored) = load(guard.name()).unwrap();
+        assert_eq!(restored.stats.files, 1);
+        assert_eq!(restored.stats.dirs, 1);
+        assert_eq!(restored.stats.size, 8);
+        let dir = restored.find_rel_path("nested").unwrap();
+        assert!(restored.nodes[dir as usize].read);
+        let file = restored.find_rel_path(path).unwrap();
+        assert_eq!(restored.nodes[file as usize].mtime, 77);
+        assert_eq!(diff(guard.name(), &restored, 100).unwrap().total_changes, 0);
+    }
+
+    #[test]
+    fn loading_rejects_unsafe_and_conflicting_paths() {
+        let _lock = test_lock();
+        let guard = SnapshotGuard::new();
+        for path in ["../escape", "/absolute", "a/./file", "a//file", "a\0file"] {
+            save(guard.name(), "root", 0, &mut source(vec![entry(path, 1)])).unwrap();
+            assert!(load(guard.name()).is_err(), "accepted {path:?}");
+        }
+        save(
+            guard.name(),
+            "root",
+            0,
+            &mut source(vec![entry("a", 1), entry("a/b", 2)]),
+        )
+        .unwrap();
+        assert!(load(guard.name()).is_err());
+    }
+
+    #[test]
+    fn public_snapshot_lifecycle_supports_metadata_listing_and_diff() {
+        let _lock = test_lock();
+        let guard = SnapshotGuard::new();
+        let mut files = source(vec![entry("old.txt", 10), entry("same.bin", 4)]);
+        let saved = save(guard.name(), "test-root", 42, &mut files).unwrap();
+        assert_eq!(saved.name, guard.name());
+        assert_eq!(saved.root, "test-root");
+        assert_eq!(saved.entries, 2);
+        assert_eq!(saved.bytes, 14);
+
+        let metadata = meta(guard.name()).unwrap();
+        assert_eq!(metadata.created, 42);
+        assert!(list().unwrap().iter().any(|m| m.name == guard.name()));
+
+        let mut live = Tree::new("root".into(), 0, 0, 0);
+        live.add_children(
+            crate::tree::ROOT,
+            vec![
+                crate::tree::NewEntry {
+                    name: "old.txt".into(),
+                    kind: Kind::File,
+                    size: 20,
+                    alloc: 20,
+                    mtime: 0,
+                    err: false,
+                    cloud: false,
+                    foreign: false,
+                },
+                crate::tree::NewEntry {
+                    name: "new.txt".into(),
+                    kind: Kind::File,
+                    size: 7,
+                    alloc: 7,
+                    mtime: 0,
+                    err: false,
+                    cloud: false,
+                    foreign: false,
+                },
+            ],
+        );
+        let diff = diff(guard.name(), &live, 10).unwrap();
+        assert_eq!(diff.total_changes, 3);
+        assert_eq!(diff.net, 13);
+        assert!(diff
+            .changes
+            .iter()
+            .any(|c| c.path == "old.txt" && c.old == 10 && c.new == 20));
+        assert!(diff
+            .changes
+            .iter()
+            .any(|c| c.path == "same.bin" && c.removed));
+        assert!(diff.changes.iter().any(|c| c.path == "new.txt" && c.added));
+
+        delete(guard.name()).unwrap();
+        let error = match meta(guard.name()) {
+            Ok(_) => panic!("deleted snapshot still exists"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn legacy_json_snapshots_are_migrated_on_first_access() {
+        let _lock = test_lock();
+        let guard = SnapshotGuard::new();
+        let dir = dir().unwrap();
+        let legacy_path = dir.join(format!("{}.json", guard.name()));
+        let legacy = serde_json::json!({
+            "root": "legacy-root",
+            "created": 7,
+            "entries": [{
+                "path": "legacy.txt",
+                "kind": "file",
+                "size": 12,
+                "alloc": 12,
+                "mtime": 0
+            }]
+        });
+        std::fs::write(&legacy_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let metadata = meta(guard.name()).unwrap();
+        assert_eq!(metadata.root, "legacy-root");
+        assert_eq!(metadata.entries, 1);
+        assert!(dir.join(format!("{}.duws", guard.name())).exists());
+        assert!(!legacy_path.exists());
+    }
+
+    #[test]
+    fn corrupt_snapshot_headers_are_rejected() {
+        let _lock = test_lock();
+        let guard = SnapshotGuard::new();
+        let path = path_for(guard.name(), "duws").unwrap();
+        std::fs::write(path, b"not a snapshot").unwrap();
+        let error = match meta(guard.name()) {
+            Ok(_) => panic!("corrupt snapshot was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn saving_unsorted_entries_returns_an_input_error() {
+        let _lock = test_lock();
+        let guard = SnapshotGuard::new();
+        let mut files = source(vec![entry("z", 1), entry("a", 1)]);
+        let error = match save(guard.name(), "root", 0, &mut files) {
+            Ok(_) => panic!("unsorted snapshot source was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(!path_for(guard.name(), "duws").unwrap().exists());
+    }
+
+    #[test]
+    fn binary_readers_reject_corrupt_headers_and_varints() {
+        fn error_kind<T>(result: io::Result<T>) -> io::ErrorKind {
+            match result {
+                Ok(_) => panic!("corrupt input was accepted"),
+                Err(error) => error.kind(),
+            }
+        }
+
+        let header = Header {
+            format_version: FORMAT_VERSION,
+            flags: 0,
+            created: 1,
+            entry_count: 0,
+            total_size: 0,
+            total_alloc: 0,
+            root: "root".into(),
+            app_version: "test".into(),
+        };
+        let mut valid = Vec::new();
+        write_header(&mut valid, &header).unwrap();
+
+        let mut bad_magic = valid.clone();
+        bad_magic[0] = b'x';
+        assert_eq!(
+            error_kind(read_header(&mut bad_magic.as_slice())),
+            io::ErrorKind::InvalidData
+        );
+
+        let mut bad_version = valid.clone();
+        bad_version[16..18].copy_from_slice(&99u16.to_le_bytes());
+        assert_eq!(
+            error_kind(read_header(&mut bad_version.as_slice())),
+            io::ErrorKind::InvalidData
+        );
+
+        let mut bad_length = valid.clone();
+        bad_length[20..24].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            error_kind(read_header(&mut bad_length.as_slice())),
+            io::ErrorKind::InvalidData
+        );
+
+        let mut overflow = &[0x80u8; 10][..];
+        assert_eq!(
+            error_kind(read_varint(&mut overflow)),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(kind_from_byte(255), Kind::Other);
+    }
+
+    #[test]
+    fn zero_diff_limit_keeps_totals_but_no_changes() {
+        let mut old = source(vec![entry("a", 10)]);
+        let mut new = source(vec![entry("a", 20), entry("b", 30)]);
+        let diff = diff_sources(&mut old, &mut new, 0).unwrap();
+        assert_eq!(diff.total_changes, 2);
+        assert_eq!(diff.net, 40);
+        assert!(diff.changes.is_empty());
     }
 }

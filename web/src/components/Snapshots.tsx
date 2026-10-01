@@ -74,7 +74,7 @@ export function Snapshots({ root }: { root: string }) {
               <div className="snap-info" title={s.root}>
                 <span className="snap-name">{s.name}</span>
                 <span className="snap-meta">
-                  {mtime(s.created)} · {count(s.entries)} files · {bytes(s.bytes)} · snapshot{' '}
+                  {mtime(s.created)} · {count(s.entries)} entries · {bytes(s.bytes)} · snapshot{' '}
                   {bytes(s.file_bytes)}
                 </span>
               </div>

@@ -47,3 +47,44 @@ fn reply(path: &str, file: rust_embed::EmbeddedFile) -> Response {
     )
         .into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn root_serves_index_html_without_caching() {
+        let response = serve(Uri::from_static("/")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "text/html");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(body
+            .windows(b"<!doctype".len())
+            .any(|w| w.eq_ignore_ascii_case(b"<!doctype")));
+    }
+
+    #[tokio::test]
+    async fn unknown_routes_fall_back_to_the_spa_entry_point() {
+        let root = serve(Uri::from_static("/")).await;
+        let fallback = serve(Uri::from_static("/a/client/route")).await;
+        let root_body = to_bytes(root.into_body(), usize::MAX).await.unwrap();
+        let fallback_body = to_bytes(fallback.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(fallback_body, root_body);
+    }
+
+    #[tokio::test]
+    async fn hashed_assets_use_immutable_cache_headers() {
+        let asset = Dist::iter()
+            .find(|path| path.starts_with("assets/"))
+            .expect("web build should contain a hashed asset");
+        let response = serve(Uri::try_from(format!("/{asset}")).unwrap()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "public, max-age=31536000, immutable"
+        );
+        assert!(response.headers().get(header::CONTENT_TYPE).is_some());
+    }
+}

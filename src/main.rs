@@ -37,9 +37,19 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let args = Args::parse();
     let demo = args.demo;
+    let loaded = args
+        .snapshot
+        .as_deref()
+        .map(|name| {
+            snapshots::load(name).map_err(|e| format!("cannot load snapshot {name:?}: {e}"))
+        })
+        .transpose()?;
+    let from_snapshot = loaded.is_some();
 
     // Demo mode never touches the filesystem; its root only names the tree.
-    let root = if demo {
+    let root = if let Some((meta, _)) = &loaded {
+        PathBuf::from(&meta.root)
+    } else if demo {
         if args.path == Path::new(".") {
             PathBuf::from("atlas-archive")
         } else {
@@ -71,18 +81,22 @@ fn run() -> Result<(), String> {
         local_only,
     };
 
-    let scanner = if demo {
+    let scanner = if let Some((_, tree)) = loaded {
+        Scanner::from_snapshot(opts, tree)
+    } else if demo {
         Scanner::new_demo(opts)
     } else {
         Scanner::new(opts).map_err(|e| format!("cannot scan {}: {e}", root.display()))?
     };
 
-    // Script and CI modes: scan synchronously, print, and never bind a port.
+    // Script and CI modes: load or scan synchronously, then print without a port.
     if args.json || args.top.is_some() {
-        if demo {
-            scanner.run_demo();
-        } else {
-            scanner.run();
+        if !from_snapshot {
+            if demo {
+                scanner.run_demo();
+            } else {
+                scanner.run();
+            }
         }
         print_mount_hint(&scanner);
         return print_report(&scanner, &root, &args);
@@ -106,25 +120,31 @@ fn run() -> Result<(), String> {
 
     // The walker is CPU/IO bound and fully synchronous; keep it off the async
     // runtime so progress requests stay responsive.
-    let worker = Arc::clone(&scanner);
-    let auto_dupes = args.duplicates.then_some(args.duplicates_min);
-    std::thread::Builder::new()
-        .name("duw-scan".into())
-        .spawn(move || {
-            if demo {
-                worker.run_demo();
-            } else {
-                worker.run();
-            }
-            // Duplicate detection needs the whole tree, so it waits for the
-            // walk rather than racing it.
-            if let Some(min) = auto_dupes {
-                if !worker.is_cancelled() {
-                    dupes.start(tree::ROOT, min);
+    if from_snapshot {
+        if args.duplicates {
+            dupes.start(tree::ROOT, args.duplicates_min);
+        }
+    } else {
+        let worker = Arc::clone(&scanner);
+        let auto_dupes = args.duplicates.then_some(args.duplicates_min);
+        std::thread::Builder::new()
+            .name("duw-scan".into())
+            .spawn(move || {
+                if demo {
+                    worker.run_demo();
+                } else {
+                    worker.run();
                 }
-            }
-        })
-        .map_err(|e| format!("cannot start scanner: {e}"))?;
+                // Duplicate detection needs the whole tree, so it waits for the
+                // walk rather than racing it.
+                if let Some(min) = auto_dupes {
+                    if !worker.is_cancelled() {
+                        dupes.start(tree::ROOT, min);
+                    }
+                }
+            })
+            .map_err(|e| format!("cannot start scanner: {e}"))?;
+    }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -146,7 +166,11 @@ fn run() -> Result<(), String> {
             .map_err(|e| format!("cannot read local address: {e}"))?;
         let url = format!("http://{}", display_addr(local));
 
-        println!("duw: scanning {}", root.display());
+        if let Some(name) = &args.snapshot {
+            println!("duw: loaded snapshot {name:?} ({})", root.display());
+        } else {
+            println!("duw: scanning {}", root.display());
+        }
         println!("duw: {url}");
         println!("duw: press Ctrl+C to stop");
 
@@ -261,4 +285,58 @@ fn print_report(scanner: &Scanner, root: &std::path::Path, args: &Args) -> Resul
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_addr_uses_localhost_for_unspecified_addresses() {
+        assert_eq!(
+            display_addr("0.0.0.0:4312".parse().unwrap()),
+            "localhost:4312"
+        );
+        assert_eq!(
+            display_addr("127.0.0.1:4312".parse().unwrap()),
+            "127.0.0.1:4312"
+        );
+    }
+
+    #[test]
+    fn build_excludes_combines_cli_and_file_patterns() {
+        let path = std::env::temp_dir().join(format!("duw-excludes-test-{}", std::process::id()));
+        std::fs::write(&path, "# ignored\n\nfrom-file/**\n").unwrap();
+
+        let args = Args {
+            exclude: vec!["*.tmp".into()],
+            exclude_from: Some(path.clone()),
+            ..Args::parse_from(["duw"])
+        };
+        let set = build_excludes(&args).unwrap().unwrap();
+        assert!(set.is_match("note.tmp"));
+        assert!(set.is_match("from-file/note.txt"));
+        assert!(!set.is_match("keep.txt"));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn build_excludes_reports_invalid_patterns_and_missing_files() {
+        let invalid = Args {
+            exclude: vec!["[".into()],
+            ..Args::parse_from(["duw"])
+        };
+        assert!(build_excludes(&invalid)
+            .unwrap_err()
+            .contains("bad exclude pattern"));
+
+        let missing = Args {
+            exclude_from: Some(std::path::PathBuf::from("does-not-exist")),
+            ..Args::parse_from(["duw"])
+        };
+        assert!(build_excludes(&missing)
+            .unwrap_err()
+            .contains("cannot read"));
+    }
 }

@@ -44,7 +44,9 @@ cargo install duw
   runs when you ask for it. It groups by the sizes the scan recorded, so
   rescan a folder whose contents changed before comparing.
 - **Snapshots**: save the current scan and compare a later one against it to
-  see what grew or shrank.
+  see what grew or shrank. Open a saved scan immediately with
+  `duw --snapshot <NAME>`, without scanning again. Rescan individual folders
+  from the UI when you want to refresh them.
 - **Filters**: search by name, extension, size and age. Matching covers the
   whole folder in view and the treemap narrows with it.
 - **Age map**: colour by how long since each entry was modified, from green
@@ -72,6 +74,8 @@ duw [OPTIONS] [PATH]
   -p, --port <PORT>        Port to listen on (0 picks a free one)
       --host <HOST>        Address to bind [default: 127.0.0.1]
       --no-open            Do not open a browser window
+      --snapshot <NAME>    Load a saved scan by name, using its saved root path
+                           instead of running an initial scan
   -x, --one-file-system    Skip directories on other filesystems (Unix only).
                            When a scan crosses onto one, duw points it out and
                            suggests this flag.
@@ -105,7 +109,16 @@ duw --exclude '*/node_modules' --exclude '.git' ~/src
 duw -d 2 --no-open -p 8080 /
 duw --json /var/log | jq '.largest[0]'
 duw --top 20 ~/Downloads
+duw --snapshot "before cleanup"
+duw --snapshot "before cleanup" --json
 ```
+
+Snapshot names are shown in the UI's Snapshots tab; use the name without the
+`.duws` extension. `--snapshot` cannot be combined with a positional `PATH`.
+The saved root does not need to be present to view the scan. Scan options apply
+to subsequent UI rescans, not to the loaded data. New snapshots preserve empty
+folders and directory sizes and modification times. Older snapshots still
+load, but can only reconstruct folders referenced by their saved file paths.
 
 ## Building from source
 

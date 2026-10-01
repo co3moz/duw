@@ -802,6 +802,15 @@ impl Tree {
         SortedFiles::new(self)
     }
 
+    /// All entries for replaying a snapshot, including the root and empty
+    /// directories. Directory paths end in `/` to retain byte-wise ordering.
+    pub fn sorted_entries(&self) -> SortedFiles<'_> {
+        let mut source = SortedFiles::new(self);
+        source.include_dirs = true;
+        source.root_pending = true;
+        source
+    }
+
     /// Files under `id` worth considering as duplicate candidates: real files
     /// of at least `min_size` whose bytes are actually on this disk. Paths are
     /// built during the walk rather than looked up per file.
@@ -1007,6 +1016,23 @@ pub struct FileInfo {
     pub size: u64,
     pub alloc: u64,
     pub mtime: i64,
+    pub err: bool,
+    pub cloud: bool,
+    pub foreign: bool,
+}
+
+impl FileInfo {
+    fn from_node(node: &Node) -> Self {
+        Self {
+            kind: node.kind,
+            size: node.self_size,
+            alloc: node.self_alloc,
+            mtime: node.mtime,
+            err: node.err,
+            cloud: node.cloud,
+            foreign: node.foreign,
+        }
+    }
 }
 
 /// A stream of file entries in path order. The live tree and a saved snapshot
@@ -1055,6 +1081,8 @@ pub struct SortedFiles<'a> {
     /// previous file name.
     file_mark: Option<usize>,
     info: FileInfo,
+    include_dirs: bool,
+    root_pending: bool,
 }
 
 impl<'a> SortedFiles<'a> {
@@ -1076,11 +1104,22 @@ impl<'a> SortedFiles<'a> {
                 size: 0,
                 alloc: 0,
                 mtime: 0,
+                err: false,
+                cloud: false,
+                foreign: false,
             },
+            include_dirs: false,
+            root_pending: false,
         }
     }
 
     fn next_file(&mut self) -> bool {
+        if self.root_pending {
+            self.root_pending = false;
+            let root = &self.tree.nodes[ROOT as usize];
+            self.info = FileInfo::from_node(root);
+            return true;
+        }
         if let Some(mark) = self.file_mark.take() {
             self.path.truncate(mark);
         }
@@ -1110,6 +1149,12 @@ impl<'a> SortedFiles<'a> {
                     next: 0,
                     restore,
                 });
+                if self.include_dirs {
+                    self.path.push('/');
+                    self.file_mark = Some(self.path.len() - 1);
+                    self.info = FileInfo::from_node(node);
+                    return true;
+                }
             } else {
                 let mark = self.path.len();
                 if !self.path.is_empty() {
@@ -1117,12 +1162,7 @@ impl<'a> SortedFiles<'a> {
                 }
                 self.path.push_str(&node.name);
                 self.file_mark = Some(mark);
-                self.info = FileInfo {
-                    kind: node.kind,
-                    size: node.self_size,
-                    alloc: node.self_alloc,
-                    mtime: node.mtime,
-                };
+                self.info = FileInfo::from_node(node);
                 return true;
             }
         }
@@ -1626,5 +1666,22 @@ mod tests {
         let top = t.largest_files(ROOT, false, 1);
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].path, "d/big");
+    }
+
+    #[test]
+    fn mark_read_finishes_empty_directories_and_records_errors() {
+        let mut t = Tree::new("root".into(), 0, 0, 0);
+        let dir = t.add_children(ROOT, vec![entry("empty", Kind::Dir, 0)])[0];
+        t.nodes[dir as usize].read = false;
+        let version = t.version;
+
+        t.mark_read(dir, true);
+        assert!(t.nodes[dir as usize].read);
+        assert!(t.nodes[dir as usize].err);
+        assert_eq!(t.version, version + 1);
+
+        t.record_error("/root/empty".into(), "permission denied".into());
+        assert_eq!(t.stats.errors, 1);
+        assert_eq!(t.errors[0].message, "permission denied");
     }
 }

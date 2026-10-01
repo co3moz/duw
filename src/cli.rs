@@ -13,6 +13,10 @@ pub struct Args {
     #[arg(default_value = ".")]
     pub path: PathBuf,
 
+    /// Load a saved snapshot by name instead of scanning. Uses its saved root.
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["path", "demo"])]
+    pub snapshot: Option<String>,
+
     /// Port to listen on (0 picks a free one).
     #[arg(short = 'p', long, default_value_t = 0)]
     pub port: u16,

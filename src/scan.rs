@@ -46,7 +46,7 @@ pub struct Scanner {
     /// Wall time of finished walks; only meaningful once `done` is set.
     final_ms: AtomicU64,
     seen_links: Arc<Mutex<HashSet<(u64, u64)>>>,
-    root_device: u64,
+    root_device: AtomicU64,
 }
 
 impl Scanner {
@@ -65,7 +65,7 @@ impl Scanner {
         let tree = Tree::new(name, size, alloc, fsext::mtime(&md));
         Ok(Arc::new(Scanner {
             tree: Arc::new(RwLock::new(tree)),
-            root_device: fsext::device(&md),
+            root_device: AtomicU64::new(fsext::device(&md)),
             opts,
             cancel: AtomicBool::new(false),
             done: AtomicBool::new(false),
@@ -79,6 +79,23 @@ impl Scanner {
 
     pub fn is_done(&self) -> bool {
         self.done.load(Ordering::Acquire)
+    }
+
+    /// A loaded scan is idle from the start. The root need not exist until a
+    /// rescan is requested (for example, a disconnected external disk).
+    pub fn from_snapshot(opts: ScanOpts, tree: Tree) -> Arc<Self> {
+        Arc::new(Scanner {
+            tree: Arc::new(RwLock::new(tree)),
+            root_device: AtomicU64::new(0),
+            opts,
+            cancel: AtomicBool::new(false),
+            done: AtomicBool::new(true),
+            busy: AtomicBool::new(false),
+            started: Instant::now(),
+            rescan_start: Mutex::new(None),
+            final_ms: AtomicU64::new(0),
+            seen_links: Arc::new(Mutex::new(HashSet::new())),
+        })
     }
 
     /// True from construction until the initial walk finishes, and again while
@@ -154,6 +171,11 @@ impl Scanner {
     /// The synchronous half of `rescan`: refresh the node's own stat and, for
     /// a directory, walk its contents again.
     fn rescan_walk(self: &Arc<Self>, id: u32, path: &Path) {
+        fsext::init(&self.opts.root);
+        if let Ok(md) = fs::metadata(&self.opts.root) {
+            self.root_device
+                .store(fsext::device(&md), Ordering::Relaxed);
+        }
         let Some((kind, depth)) = self.tree.read().unwrap().get(id).map(|n| (n.kind, n.depth))
         else {
             return;
@@ -229,7 +251,7 @@ impl Scanner {
         let name = display_root(&opts.root);
         Arc::new(Scanner {
             tree: Arc::new(RwLock::new(Tree::new(name, 0, 0, 0))),
-            root_device: 0,
+            root_device: AtomicU64::new(0),
             opts,
             cancel: AtomicBool::new(false),
             done: AtomicBool::new(false),
@@ -484,7 +506,8 @@ impl Scanner {
             };
             let filtered = cloud && self.opts.local_only;
 
-            let cross = kind == Kind::Dir && fsext::device(&md) != self.root_device;
+            let cross =
+                kind == Kind::Dir && fsext::device(&md) != self.root_device.load(Ordering::Relaxed);
             if kind == Kind::Dir {
                 if self.opts.one_file_system {
                     if cross {
@@ -651,6 +674,7 @@ impl DemoWalk {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use globset::{Glob, GlobSetBuilder};
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -785,5 +809,92 @@ mod tests {
         }
 
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn initial_scan_applies_excludes_and_depth_limits() {
+        let root =
+            std::env::temp_dir().join(format!("duw-scan-options-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("nested/inner")).unwrap();
+        fs::write(root.join("keep.txt"), b"keep").unwrap();
+        fs::write(root.join("skip.txt"), b"skip").unwrap();
+        fs::write(root.join("nested/inner/deep.txt"), b"deep").unwrap();
+
+        let mut excludes = GlobSetBuilder::new();
+        excludes.add(Glob::new("skip.txt").unwrap());
+        let scanner = Scanner::new(ScanOpts {
+            root: root.clone(),
+            one_file_system: false,
+            include_system_volumes: false,
+            dereference: false,
+            count_links: false,
+            max_depth: Some(1),
+            exclude: Some(excludes.build().unwrap()),
+            threads: Some(1),
+            local_only: false,
+        })
+        .unwrap();
+        assert!(scanner.is_busy());
+        scanner.run();
+
+        let tree = scanner.tree.read().unwrap();
+        assert!(scanner.is_done());
+        assert!(!scanner.is_busy());
+        assert!(tree.find_rel_path("keep.txt").is_some());
+        assert!(tree.find_rel_path("skip.txt").is_none());
+        assert!(tree.find_rel_path("nested").is_some());
+        assert!(tree.find_rel_path("nested/inner").is_some());
+        assert!(tree.find_rel_path("nested/inner/deep.txt").is_none());
+        assert_eq!(tree.stats.files, 1);
+        let _elapsed_ms = scanner.elapsed_ms();
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rescan_is_rejected_until_the_initial_walk_finishes() {
+        let root = std::env::temp_dir().join(format!("duw-scan-busy-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let scanner = Scanner::new(ScanOpts {
+            root: root.clone(),
+            one_file_system: false,
+            include_system_volumes: false,
+            dereference: false,
+            count_links: false,
+            max_depth: None,
+            exclude: None,
+            threads: Some(1),
+            local_only: false,
+        })
+        .unwrap();
+        assert!(!scanner.rescan(ROOT, root.clone(), || {}));
+        assert!(!scanner.is_done());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn new_rejects_a_file_as_the_scan_root() {
+        let path =
+            std::env::temp_dir().join(format!("duw-scan-file-root-test-{}", std::process::id()));
+        fs::write(&path, b"not a directory").unwrap();
+        let result = Scanner::new(ScanOpts {
+            root: path.clone(),
+            one_file_system: false,
+            include_system_volumes: false,
+            dereference: false,
+            count_links: false,
+            max_depth: None,
+            exclude: None,
+            threads: None,
+            local_only: false,
+        });
+        let error = match result {
+            Ok(_) => panic!("a file was accepted as the scan root"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        fs::remove_file(path).unwrap();
     }
 }

@@ -202,7 +202,7 @@ export interface SnapshotMeta {
   root: string
   created: number
   entries: number
-  /** Sum of the scanned file sizes the snapshot describes. */
+  /** Sum of the saved entry sizes (older snapshots contain only files). */
   bytes: number
   /** Size of the snapshot file itself on disk. */
   file_bytes: number

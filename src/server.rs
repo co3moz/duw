@@ -693,7 +693,7 @@ async fn save_snapshot(
     }
     let result = {
         let tree = state.scanner.tree.read().unwrap();
-        let mut files = tree.sorted_files();
+        let mut files = tree.sorted_entries();
         snapshots::save(&name, &state.root, snapshots::now(), &mut files)
     };
     match result {
@@ -860,6 +860,7 @@ mod tests {
     struct Fixture {
         state: AppState,
         root: std::path::PathBuf,
+        shutdown: watch::Sender<bool>,
     }
     impl Fixture {
         fn new(done: bool) -> Self {
@@ -885,22 +886,42 @@ mod tests {
                 scanner.run();
             }
             let dupes = Dupes::new(scanner.tree.clone(), root.clone(), false);
-            let (_, shutdown) = watch::channel(false);
+            let (shutdown, shutdown_rx) = watch::channel(false);
             let state = AppState {
                 scanner,
                 dupes,
                 root: root.display().to_string(),
                 local_only: true,
                 dupes_min: 1,
-                shutdown,
+                shutdown: shutdown_rx,
             };
-            Self { state, root }
+            Self {
+                state,
+                root,
+                shutdown,
+            }
         }
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir(&self.root);
         }
+    }
+
+    async fn json_body(response: Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(response.into_body(), 200_000)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    async fn get_json(f: &Fixture, uri: &str) -> (StatusCode, serde_json::Value) {
+        let response = router(f.state.clone())
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        (status, json_body(response).await)
     }
 
     #[tokio::test]
@@ -940,6 +961,350 @@ mod tests {
             attributed,
             f.state.scanner.tree.read().unwrap().nodes[0].total_alloc
         );
+    }
+
+    #[tokio::test]
+    async fn read_endpoints_return_state_and_tree_views() {
+        let f = Fixture::new(false);
+        std::fs::write(f.root.join("alpha.txt"), b"alpha-content").unwrap();
+        std::fs::write(f.root.join("beta.bin"), b"bin").unwrap();
+        f.state.scanner.run();
+
+        let (status, state) = get_json(&f, "/api/state").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(state["root_id"], 0);
+        assert_eq!(state["local_only"], true);
+        assert_eq!(state["scanning"], false);
+
+        let (status, node) =
+            get_json(&f, "/api/node/0?metric=alloc&sort=name&asc=true&limit=1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(node["id"], 0);
+        assert_eq!(node["children"].as_array().unwrap().len(), 1);
+        assert_eq!(node["scanning"], false);
+
+        let (status, types) = get_json(&f, "/api/types/0").await;
+        assert_eq!(status, StatusCode::OK);
+        let extensions: Vec<&str> = types["types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["ext"].as_str().unwrap())
+            .collect();
+        assert!(extensions.contains(&"txt"));
+        assert!(extensions.contains(&"bin"));
+
+        let (status, largest) = get_json(&f, "/api/largest/0?metric=size&limit=1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(largest["files"].as_array().unwrap().len(), 1);
+        assert_eq!(largest["files"][0]["path"], "alpha.txt");
+
+        let (status, errors) = get_json(&f, "/api/errors").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(errors.as_array().unwrap().is_empty());
+
+        let (status, absolute) = get_json(&f, "/api/abs/0").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(absolute["path"], f.state.root);
+
+        let (status, search) = get_json(
+            &f,
+            "/api/search/0?q=ALPHA&ext=.TXT&min=1&max=100000&metric=alloc&limit=1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(search["hits"].as_array().unwrap().len(), 1);
+        assert_eq!(search["hits"][0]["path"], "alpha.txt");
+        assert_eq!(search["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn read_endpoints_reject_removed_or_unknown_ids() {
+        let f = Fixture::new(true);
+        for path in [
+            "/api/types/999",
+            "/api/largest/999",
+            "/api/search/999?q=x",
+            "/api/abs/999",
+            "/api/node/999",
+            "/api/tree/999",
+        ] {
+            let response = router(f.state.clone())
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+
+        for path in ["/api/reveal/999", "/api/trash/999"] {
+            let response = router(f.state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+
+        let response = router(f.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/trash/0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = router(f.state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn events_emit_progress_and_close_after_shutdown() {
+        let f = Fixture::new(true);
+        let response = router(f.state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_task =
+            tokio::spawn(async move { axum::body::to_bytes(response.into_body(), 20_000).await });
+        tokio::time::sleep(Duration::from_millis(220)).await;
+        f.shutdown.send(true).unwrap();
+        let body = tokio::time::timeout(Duration::from_secs(1), body_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(body
+            .windows(b"event: done".len())
+            .any(|w| w == b"event: done"));
+    }
+
+    #[tokio::test]
+    async fn mutation_handlers_report_busy_and_action_failures() {
+        let busy = Fixture::new(false);
+        for path in ["/api/trash/999", "/api/rescan/0"] {
+            let response = router(busy.state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT, "{path}");
+        }
+
+        let f = Fixture::new(false);
+        std::fs::write(f.root.join("vanished.txt"), b"gone").unwrap();
+        f.state.scanner.run();
+        let id = f
+            .state
+            .scanner
+            .tree
+            .read()
+            .unwrap()
+            .find_rel_path("vanished.txt")
+            .unwrap();
+        std::fs::remove_file(f.root.join("vanished.txt")).unwrap();
+        let response = router(f.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/trash/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn snapshot_and_duplicate_mutations_validate_input() {
+        let _snapshot_lock = crate::snapshots::test_lock();
+        let f = Fixture::new(true);
+
+        let response = router(f.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/snapshots?name=..%2Fbad")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = router(f.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/snapshots/does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = router(f.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/duplicates/999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn request_helpers_cover_sorting_limits_and_origin_validation() {
+        assert_eq!(Sort::Size.key(), SortKey::Size);
+        assert_eq!(Sort::Name.key(), SortKey::Name);
+        assert_eq!(Sort::Mtime.key(), SortKey::Mtime);
+        assert_eq!(Sort::Count.key(), SortKey::Count);
+        assert_eq!(clamp_limit(None), DEFAULT_LIMIT);
+        assert_eq!(clamp_limit(Some(0)), 1);
+        assert_eq!(clamp_limit(Some(MAX_LIMIT + 1)), MAX_LIMIT);
+
+        assert!(!cross_site(&HeaderMap::new()));
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ORIGIN, "http://localhost:3000".parse().unwrap());
+        assert!(cross_site(&headers));
+        headers.insert(header::HOST, "localhost:3000".parse().unwrap());
+        assert!(!cross_site(&headers));
+        headers.insert(header::ORIGIN, "null".parse().unwrap());
+        assert!(cross_site(&headers));
+        headers.insert(header::ORIGIN, "http://localhost:4000".parse().unwrap());
+        assert!(cross_site(&headers));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn snapshot_routes_save_list_diff_and_delete() {
+        let _snapshot_lock = crate::snapshots::test_lock();
+        let f = Fixture::new(false);
+        std::fs::write(f.root.join("saved.txt"), b"snapshot me").unwrap();
+        f.state.scanner.run();
+        let name = format!(
+            "api-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let cleanup = name.clone();
+
+        let response = router(f.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/snapshots?name={name}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let saved = json_body(response).await;
+        assert_eq!(saved["name"], name);
+
+        let (status, listed) = get_json(&f, "/api/snapshots").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(listed["snapshots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|snapshot| snapshot["name"] == name));
+
+        let (status, diff) = get_json(&f, &format!("/api/snapshots/{name}/diff?limit=1")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(diff["total_changes"], 0);
+
+        let response = router(f.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/snapshots/{name}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let response = router(f.state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/snapshots/{name}/diff"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let _ = crate::snapshots::delete(&cleanup);
+    }
+
+    #[tokio::test]
+    async fn duplicate_polling_and_cancel_are_available_after_scan() {
+        let f = Fixture::new(true);
+        let response = router(f.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/duplicates/0?min=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let (status, duplicates) = get_json(&f, "/api/duplicates/0?limit=1").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(duplicates["groups"].is_array());
+        assert!(duplicates["progress"]["generation"].as_u64().unwrap() >= 1);
+
+        let response = router(f.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/duplicates/cancel")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
 
     #[tokio::test]
